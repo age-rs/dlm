@@ -145,7 +145,7 @@ async fn main_result() -> Result<(), DlmError> {
                     let link = link.trim();
                     if link.is_empty() {
                         Some("Skipping empty line".to_string())
-                    } else if link.starts_with("#") {
+                    } else if link.starts_with('#') {
                         Some("Skipping comment line".to_string())
                     } else {
                         // claim a progress bar for the upcoming download
