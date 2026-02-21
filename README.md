@@ -7,12 +7,20 @@ A minimal HTTP download manager that works just fine.
 
 ## Features
 
-- read URLs from a text file (one entry per line)
+- read URLs from a text file
 - control maximum number of concurrent downloads
 - resume interrupted downloads if possible (using HTTP range)
 - automatically retry re-establishing download in case of timeout or hanging connection
 - multi progress bars (made with [indicatif](https://github.com/mitsuhiko/indicatif))
 - native support for proxies and redirects
+
+### Input file format
+
+- one URL per line
+- empty lines are ignored
+- lines starting with `#` are ignored as comment
+
+## Usage
 
 ```
 ./dlm --help

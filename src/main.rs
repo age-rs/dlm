@@ -141,50 +141,56 @@ async fn main_result() -> Result<(), DlmError> {
             }
             let message = match link_res {
                 Err(e) => Some(format!("Error with links iterator {e}")),
-                Ok(link) if link.trim().is_empty() => Some("Skipping empty line".to_string()),
                 Ok(link) => {
-                    // claim a progress bar for the upcoming download
-                    let dl_pb = pbm_ref
-                        .rx
-                        .recv()
-                        .await
-                        .expect("claiming progress bar should not fail");
+                    let link = link.trim();
+                    if link.is_empty() {
+                        Some("Skipping empty line".to_string())
+                    } else if link.starts_with("#") {
+                        Some("Skipping comment line".to_string())
+                    } else {
+                        // claim a progress bar for the upcoming download
+                        let dl_pb = pbm_ref
+                            .rx
+                            .recv()
+                            .await
+                            .expect("claiming progress bar should not fail");
 
-                    // exponential backoff retries for network errors
-                    let retry_strategy = retry_strategy(retry);
+                        // exponential backoff retries for network errors
+                        let retry_strategy = retry_strategy(retry);
 
-                    let processed = RetryIf::spawn(
-                        retry_strategy,
-                        || {
-                            download_link(
-                                &link,
-                                c_ref,
-                                c_no_redirect_ref,
-                                connection_timeout_secs,
-                                od_ref,
-                                token_clone,
-                                &dl_pb,
-                                pbm_ref,
-                                accept_ref,
-                            )
-                        },
-                        |e: &DlmError| retry_handler(e, pbm_ref, &link),
-                    )
-                    .await;
+                        let processed = RetryIf::spawn(
+                            retry_strategy,
+                            || {
+                                download_link(
+                                    link,
+                                    c_ref,
+                                    c_no_redirect_ref,
+                                    connection_timeout_secs,
+                                    od_ref,
+                                    token_clone,
+                                    &dl_pb,
+                                    pbm_ref,
+                                    accept_ref,
+                                )
+                            },
+                            |e: &DlmError| retry_handler(e, pbm_ref, link),
+                        )
+                        .await;
 
-                    // reset & release progress bar
-                    ProgressBarManager::reset_progress_bar(&dl_pb);
-                    pbm_ref
-                        .tx
-                        .send(dl_pb)
-                        .await
-                        .expect("releasing progress bar should not fail");
+                        // reset & release progress bar
+                        ProgressBarManager::reset_progress_bar(&dl_pb);
+                        pbm_ref
+                            .tx
+                            .send(dl_pb)
+                            .await
+                            .expect("releasing progress bar should not fail");
 
-                    // extract result
-                    match processed {
-                        Ok(info) => Some(info),
-                        Err(DlmError::ProgramInterrupted) => None, // no logs on interrupt
-                        Err(e) => Some(format!("Error for {link}: {e}")),
+                        // extract result
+                        match processed {
+                            Ok(info) => Some(info),
+                            Err(DlmError::ProgramInterrupted) => None, // no logs on interrupt
+                            Err(e) => Some(format!("Error for {link}: {e}")),
+                        }
                     }
                 }
             };
