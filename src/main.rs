@@ -142,11 +142,8 @@ async fn main_result() -> Result<(), DlmError> {
             let message = match link_res {
                 Err(e) => Some(format!("Error with links iterator {e}")),
                 Ok(link) => {
-                    let link = link.trim();
-                    if link.is_empty() {
-                        Some("Skipping empty line".to_string())
-                    } else if link.starts_with('#') {
-                        Some("Skipping comment line".to_string())
+                    if is_empty_line(&link) {
+                        None
                     } else {
                         // claim a progress bar for the upcoming download
                         let dl_pb = pbm_ref
@@ -162,7 +159,7 @@ async fn main_result() -> Result<(), DlmError> {
                             retry_strategy,
                             || {
                                 download_link(
-                                    link,
+                                    &link,
                                     c_ref,
                                     c_no_redirect_ref,
                                     connection_timeout_secs,
@@ -173,7 +170,7 @@ async fn main_result() -> Result<(), DlmError> {
                                     accept_ref,
                                 )
                             },
-                            |e: &DlmError| retry_handler(e, pbm_ref, link),
+                            |e: &DlmError| retry_handler(e, pbm_ref, &link),
                         )
                         .await;
 
@@ -212,13 +209,18 @@ async fn main_result() -> Result<(), DlmError> {
     }
 }
 
+fn is_empty_line(line: &str) -> bool {
+    let line = line.trim();
+    line.is_empty() || line.starts_with('#')
+}
+
 async fn count_non_empty_lines(input_file: &str) -> Result<u64, DlmError> {
     let file = tfs::File::open(input_file).await?;
     let reader = tokio::io::BufReader::new(file);
     let mut lines = reader.lines();
     let mut count = 0;
     while let Some(line) = lines.next_line().await? {
-        if !line.trim().is_empty() {
+        if !is_empty_line(&line) {
             count += 1;
         }
     }
