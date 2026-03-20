@@ -48,7 +48,7 @@ impl From<reqwest::Error> for DlmError {
             Self::ConnectionTimeout
         } else if e.is_connect() {
             Self::ConnectError
-        } else if e.is_body() {
+        } else if e.is_body() || e.is_decode() {
             Self::ResponseBodyError
         } else {
             Self::other(e.to_string())
