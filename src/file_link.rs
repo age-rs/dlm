@@ -1,6 +1,5 @@
 use crate::dlm_error::DlmError;
-
-use std::str;
+use percent_encoding::percent_decode_str;
 
 #[derive(Debug)]
 pub struct FileLink {
@@ -20,16 +19,18 @@ impl FileLink {
             let message = format!("FileLink cannot be built with an invalid extension '{trimmed}'");
             Err(DlmError::other(message))
         } else {
-            let url_decoded = url_decode(url)?;
-            let last_segment = url_decoded
-                .rsplit_once('/')
-                .map_or(&*url_decoded, |(_, s)| s);
+            // Split BEFORE decoding so an encoded '/' (%2F) inside a path
+            // segment is not mistaken for a separator.
+            let last_segment = url.rsplit_once('/').map_or(url, |(_, s)| s);
+            let decoded = percent_decode_str(last_segment).decode_utf8_lossy();
+            // A decoded segment may still contain '/' or '\\' (from %2F / %5C);
+            // those are path separators on disk, replace them.
+            let safe_name = decoded.replace(['/', '\\'], "_");
             let (extension, filename_without_extension) =
-                Self::extract_extension_from_filename(last_segment);
+                Self::extract_extension_from_filename(&safe_name);
 
-            let url = url.to_string();
             let file_link = Self {
-                url,
+                url: url.to_string(),
                 filename_without_extension,
                 extension,
             };
@@ -57,39 +58,6 @@ impl FileLink {
             (None, sanitized)
         }
     }
-}
-
-// adapted from https://github.com/bt/rust_urlencoding/blob/master/src/lib.rs#L20
-fn url_decode(data: &str) -> Result<String, DlmError> {
-    let mut unescaped_bytes: Vec<u8> = Vec::new();
-    let mut bytes = data.bytes();
-    while let Some(b) = bytes.next() {
-        match b as char {
-            '%' => {
-                let hi = bytes.next().ok_or_else(|| DlmError::UrlDecodeError {
-                    message: format!("incomplete percent-encoding in '{data}'"),
-                })?;
-                let lo = bytes.next().ok_or_else(|| DlmError::UrlDecodeError {
-                    message: format!("incomplete percent-encoding in '{data}'"),
-                })?;
-                let hex_bytes = [hi, lo];
-                let hex_str = str::from_utf8(&hex_bytes).map_err(|e| DlmError::UrlDecodeError {
-                    message: format!("invalid percent-encoding in '{data}': {e}"),
-                })?;
-                let decoded =
-                    u8::from_str_radix(hex_str, 16).map_err(|e| DlmError::UrlDecodeError {
-                        message: format!("invalid hex '{hex_str}' in '{data}': {e}"),
-                    })?;
-                unescaped_bytes.push(decoded);
-            }
-            _ => {
-                unescaped_bytes.push(b);
-            }
-        }
-    }
-    String::from_utf8(unescaped_bytes).map_err(|e| DlmError::UrlDecodeError {
-        message: e.to_string(),
-    })
 }
 
 #[cfg(test)]
@@ -199,5 +167,23 @@ mod file_link_tests {
         // TODO fix this - should be alien-archive.tar.00 or parts will collide on tmp file
         assert_eq!(fl.filename_without_extension, "alien-archive.tar");
         assert_eq!(fl.url, url);
+    }
+
+    #[test]
+    fn percent_encoded_space_in_filename() {
+        let url = "https://example.com/path/My%20Report.pdf";
+        let fl = FileLink::new(url).unwrap();
+        assert_eq!(fl.extension, Some("pdf".to_string()));
+        assert_eq!(fl.filename_without_extension, "My Report");
+    }
+
+    #[test]
+    fn encoded_slash_in_segment_is_not_a_separator() {
+        // %2F is a literal '/' inside a single path segment — must not split on it.
+        let url = "https://example.com/files/My%2FReport.pdf";
+        let fl = FileLink::new(url).unwrap();
+        assert_eq!(fl.extension, Some("pdf".to_string()));
+        // '/' is sanitized to '_' so the name remains usable on disk.
+        assert_eq!(fl.filename_without_extension, "My_Report");
     }
 }

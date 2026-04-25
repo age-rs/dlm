@@ -1,4 +1,5 @@
 use indicatif::ProgressBar;
+use percent_encoding::percent_decode_str;
 use reqwest::Client;
 use reqwest::header::{ACCEPT, HeaderMap, RANGE};
 use std::path::Path;
@@ -456,43 +457,9 @@ fn find_param<'a>(header: &'a str, param: &str) -> Option<&'a str> {
     if value.is_empty() { None } else { Some(value) }
 }
 
-/// Minimal percent-decoding for filename*= values
+/// Percent-decode a `filename*=` parameter value (lossy on invalid UTF-8).
 fn percent_decode_filename(input: &str) -> String {
-    let mut result = Vec::new();
-    let mut bytes = input.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            match (bytes.next(), bytes.next()) {
-                (Some(hi), Some(lo)) => {
-                    let hex = [hi, lo];
-                    match std::str::from_utf8(&hex)
-                        .ok()
-                        .and_then(|s| u8::from_str_radix(s, 16).ok())
-                    {
-                        Some(d) => result.push(d),
-                        None => {
-                            // invalid hex, preserve all three bytes
-                            result.push(b);
-                            result.push(hi);
-                            result.push(lo);
-                        }
-                    }
-                }
-                (Some(hi), None) => {
-                    // incomplete sequence, preserve both bytes
-                    result.push(b);
-                    result.push(hi);
-                }
-                _ => {
-                    // trailing '%', preserve it
-                    result.push(b);
-                }
-            }
-        } else {
-            result.push(b);
-        }
-    }
-    String::from_utf8_lossy(&result).into_owned()
+    percent_decode_str(input).decode_utf8_lossy().into_owned()
 }
 
 #[cfg(test)]

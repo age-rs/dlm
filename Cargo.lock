@@ -331,6 +331,7 @@ dependencies = [
  "futures-util",
  "indicatif",
  "jiff",
+ "percent-encoding",
  "rand 0.10.1",
  "reqwest",
  "thiserror 2.0.18",

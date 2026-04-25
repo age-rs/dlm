@@ -18,8 +18,6 @@ pub enum DlmError {
     IncompleteDownload { expected: u64, actual: u64 },
     #[error("response status not success - {status_code}")]
     ResponseStatusNotSuccess { status_code: u16 },
-    #[error("URL decode error - {message}")]
-    UrlDecodeError { message: String },
     #[error("standard I/O error - {e}")]
     StdIoError { e: std::io::Error },
     #[error("task error - {e}")]
