@@ -1,5 +1,6 @@
 use crate::dlm_error::DlmError;
 use crate::user_agents::{UserAgent, random_user_agent};
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Proxy};
 use std::time::Duration;
@@ -10,6 +11,7 @@ pub fn make_client(
     redirect: bool,
     connection_timeout_sec: u32,
     accept_invalid_certs: bool,
+    accept: Option<&str>,
 ) -> Result<Client, DlmError> {
     let client_builder = Client::builder()
         .connect_timeout(Duration::from_secs(u64::from(connection_timeout_sec)))
@@ -26,6 +28,16 @@ pub fn make_client(
     let client_builder = match proxy {
         Some(p) => client_builder.proxy(Proxy::all(p)?),
         _ => client_builder,
+    };
+
+    // setup default Accept header (sent on every request)
+    let client_builder = match accept.and_then(|a| HeaderValue::from_str(a).ok()) {
+        Some(value) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(ACCEPT, value);
+            client_builder.default_headers(headers)
+        }
+        None => client_builder,
     };
 
     // setup redirect

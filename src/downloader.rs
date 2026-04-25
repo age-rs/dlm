@@ -1,7 +1,7 @@
 use indicatif::ProgressBar;
 use percent_encoding::percent_decode_str;
 use reqwest::Client;
-use reqwest::header::{ACCEPT, HeaderMap, RANGE};
+use reqwest::header::{HeaderMap, RANGE};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
@@ -24,6 +24,7 @@ pub struct ClientConfig<'a> {
     pub proxy: Option<&'a str>,
     pub connection_timeout_secs: u32,
     pub accept_invalid_certs: bool,
+    pub accept: Option<&'a str>,
 }
 
 pub struct DownloadContext<'a> {
@@ -33,7 +34,6 @@ pub struct DownloadContext<'a> {
     output_dir: &'a Path,
     token: &'a CancellationToken,
     pb_manager: &'a ProgressBarManager,
-    accept_header: Option<&'a str>,
 }
 
 impl<'a> DownloadContext<'a> {
@@ -42,7 +42,6 @@ impl<'a> DownloadContext<'a> {
         output_dir: &'a Path,
         token: &'a CancellationToken,
         pb_manager: &'a ProgressBarManager,
-        accept_header: Option<&'a str>,
     ) -> Result<Self, DlmError> {
         let client = make_client(
             client_config.user_agent,
@@ -50,6 +49,7 @@ impl<'a> DownloadContext<'a> {
             true,
             client_config.connection_timeout_secs,
             client_config.accept_invalid_certs,
+            client_config.accept,
         )?;
         let client_no_redirect = make_client(
             client_config.user_agent,
@@ -57,6 +57,7 @@ impl<'a> DownloadContext<'a> {
             false,
             client_config.connection_timeout_secs,
             client_config.accept_invalid_certs,
+            client_config.accept,
         )?;
         Ok(Self {
             client,
@@ -65,58 +66,92 @@ impl<'a> DownloadContext<'a> {
             output_dir,
             token,
             pb_manager,
-            accept_header,
         })
     }
 
-    /// Extract download metadata (content-length, range support, disposition filename)
-    /// via HEAD request, falling back to GET if the server returns 405.
+    /// Extract download metadata (content-length, range support, disposition filename).
+    ///
+    /// HEAD first. The disposition filename always comes from HEAD when HEAD
+    /// succeeded; otherwise from the ranged-GET probe.
     async fn extract_metadata(
         &self,
         url: &str,
     ) -> Result<(Option<u64>, bool, Option<String>), DlmError> {
-        let mut head_request = self.client.head(url);
-        if let Some(accept) = self.accept_header {
-            head_request = head_request.header(ACCEPT, accept);
-        }
-        let head_result = head_request.send().await?;
-        let head_status = head_result.status();
+        let head = self.client.head(url).send().await?;
+        let head_status = head.status();
 
+        // HEAD outright rejected → derive the whole triple from a ranged GET.
         if head_status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
-            // Server does not support HEAD, fall back to GET with minimal range
             self.pb_manager.log_above_progress_bars(&format!(
                 "HEAD returned 405 for {url}, falling back to GET for metadata"
             ));
-            let get_result = self
-                .client
-                .get(url)
-                .header(RANGE, "bytes=0-0")
-                .send()
-                .await?;
-            if get_result.status().is_success() {
-                // Content-Length will be 1 (for the single byte requested),
-                // so extract the total size from Content-Range header instead
-                let cl = content_range_total_size(get_result.headers())
-                    .or_else(|| content_length_value(get_result.headers()));
-                let ar = supports_range_bytes(get_result.headers());
-                let df =
-                    content_disposition_value(get_result.headers()).and_then(parse_filename_header);
-                Ok((cl, ar, df))
-            } else {
-                let status_code = get_result.status().as_u16();
-                Err(DlmError::ResponseStatusNotSuccess { status_code })
-            }
-        } else if !head_status.is_success() {
-            let status_code = head_status.as_u16();
-            Err(DlmError::ResponseStatusNotSuccess { status_code })
-        } else {
-            let (content_length, supports_range) = self
-                .try_hard_to_extract_headers(head_result.headers(), url)
-                .await?;
-            let disposition_filename =
-                content_disposition_value(head_result.headers()).and_then(parse_filename_header);
-            Ok((content_length, supports_range, disposition_filename))
+            return self.metadata_from_probe(url).await;
         }
+
+        if !head_status.is_success() {
+            return Err(DlmError::ResponseStatusNotSuccess {
+                status_code: head_status.as_u16(),
+            });
+        }
+
+        // HEAD succeeded — the disposition filename is taken from it.
+        let disposition = content_disposition_value(head.headers()).and_then(parse_filename_header);
+
+        // For length + range support: probe with a ranged GET when HEAD claims
+        // `Content-Length: 0` (a sign HEAD is faked); trust HEAD when it
+        // reports a real length; give up when no header is present.
+        let (length, supports_range) = match content_length_value(head.headers()) {
+            Some(0) => self.length_and_range_from_probe(url).await?,
+            Some(n) => (Some(n), supports_range_bytes(head.headers())),
+            None => (None, false),
+        };
+
+        Ok((length, supports_range, disposition))
+    }
+
+    /// Full-triple fallback used when HEAD is outright rejected (405).
+    /// A failed probe is fatal here because we have no other source of metadata.
+    async fn metadata_from_probe(
+        &self,
+        url: &str,
+    ) -> Result<(Option<u64>, bool, Option<String>), DlmError> {
+        let probe = self.range_probe(url).await?;
+        if !probe.status().is_success() {
+            return Err(DlmError::ResponseStatusNotSuccess {
+                status_code: probe.status().as_u16(),
+            });
+        }
+        Ok(parse_metadata_from(probe.headers()))
+    }
+
+    /// Length + range-support fallback used when HEAD succeeded but reported
+    /// `Content-Length: 0`. A failed probe is recoverable: log it and give up
+    /// on length/range, keeping the disposition filename from HEAD.
+    async fn length_and_range_from_probe(
+        &self,
+        url: &str,
+    ) -> Result<(Option<u64>, bool), DlmError> {
+        let probe = self.range_probe(url).await?;
+        if !probe.status().is_success() {
+            self.pb_manager.log_above_progress_bars(&format!(
+                "GET fallback for metadata returned {} for {url}, proceeding without content-length",
+                probe.status()
+            ));
+            return Ok((None, false));
+        }
+        let (length, supports_range, _) = parse_metadata_from(probe.headers());
+        Ok((length, supports_range))
+    }
+
+    /// Single-byte ranged GET used to coax metadata out of servers that don't
+    /// answer HEAD properly. Returns the raw response for header inspection.
+    async fn range_probe(&self, url: &str) -> Result<reqwest::Response, DlmError> {
+        Ok(self
+            .client
+            .get(url)
+            .header(RANGE, "bytes=0-0")
+            .send()
+            .await?)
     }
 
     pub async fn download_link(
@@ -207,17 +242,11 @@ impl<'a> DownloadContext<'a> {
             None => tfs::File::create(&tmp_name).await?,
         };
 
-        // building the request
+        // build and send the download request
         let mut request = self.client.get(&file_link.url);
         if let Some(range) = query_range {
             request = request.header(RANGE, range);
         }
-
-        if let Some(accept) = self.accept_header {
-            request = request.header(ACCEPT, accept);
-        }
-
-        // initiate file download
         let mut dl_response = request.send().await?;
         if !dl_response.status().is_success() {
             let status_code = dl_response.status().as_u16();
@@ -328,41 +357,16 @@ impl<'a> DownloadContext<'a> {
             Ok(None)
         }
     }
+}
 
-    /// Try harder to extract content-length and range support when HEAD returns content-length: 0.
-    async fn try_hard_to_extract_headers(
-        &self,
-        head_headers: &HeaderMap,
-        url: &str,
-    ) -> Result<(Option<u64>, bool), DlmError> {
-        let tuple = match content_length_value(head_headers) {
-            Some(0) => {
-                // if "content-length": "0" then it is likely the server does not support HEAD, let's try harder with a GET
-                // Use Range: bytes=0-0 to minimize data transfer if supported
-                let get_result = self
-                    .client
-                    .get(url)
-                    .header(RANGE, "bytes=0-0")
-                    .send()
-                    .await?;
-                if !get_result.status().is_success() {
-                    let status = get_result.status();
-                    self.pb_manager.log_above_progress_bars(&format!(
-                        "GET fallback for metadata returned {status} for {url}, proceeding without content-length"
-                    ));
-                    (None, false)
-                } else {
-                    let cl = content_range_total_size(get_result.headers())
-                        .or_else(|| content_length_value(get_result.headers()));
-                    let ar = supports_range_bytes(get_result.headers());
-                    (cl, ar)
-                }
-            }
-            ct_option @ Some(_) => (ct_option, supports_range_bytes(head_headers)),
-            _ => (None, false),
-        };
-        Ok(tuple)
-    }
+/// Pull `(content-length, supports range, disposition filename)` out of a
+/// response's headers. Prefers `Content-Range` total over `Content-Length`
+/// because a `Range: bytes=0-0` probe makes `Content-Length` equal to 1.
+fn parse_metadata_from(headers: &HeaderMap) -> (Option<u64>, bool, Option<String>) {
+    let cl = content_range_total_size(headers).or_else(|| content_length_value(headers));
+    let sr = supports_range_bytes(headers);
+    let df = content_disposition_value(headers).and_then(parse_filename_header);
+    (cl, sr, df)
 }
 
 async fn compute_query_range(

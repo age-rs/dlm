@@ -77,14 +77,9 @@ async fn main_result() -> Result<(), DlmError> {
         proxy: proxy.as_deref(),
         connection_timeout_secs,
         accept_invalid_certs,
+        accept: accept.as_deref(),
     };
-    let ctx = DownloadContext::new(
-        &client_config,
-        output_dir.as_path(),
-        token,
-        pbm,
-        accept.as_deref(),
-    )?;
+    let ctx = DownloadContext::new(&client_config, output_dir.as_path(), token, pbm)?;
     let ctx = &ctx;
 
     process_downloads(stream, ctx, token, pbm, retry, max_concurrent_downloads).await;
