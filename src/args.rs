@@ -87,18 +87,26 @@ fn command() -> Command {
                 .required(false),
         )
         .arg(
-            Arg::new("accept")
-                .help("Accept header value")
-                .long("accept")
-                .short('a')
-                .num_args(1)
-                .required(false),
-        )
-        .arg(
             Arg::new("acceptInvalidCerts")
                 .help("Accept invalid TLS certificates")
                 .long("accept-invalid-certs")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("header")
+                .help("Custom request header (repeatable, format 'Name: Value')")
+                .long("header")
+                .short('H')
+                .num_args(1)
+                .action(clap::ArgAction::Append)
+                .required(false),
+        )
+        .arg(
+            Arg::new("user")
+                .help("Basic auth credentials in format 'user:password'")
+                .long("user")
+                .num_args(1)
+                .required(false),
         )
 }
 
@@ -115,8 +123,37 @@ pub struct Arguments {
     pub proxy: Option<String>,
     pub retry: u32,
     pub connection_timeout_secs: u32,
-    pub accept: Option<String>,
     pub accept_invalid_certs: bool,
+    pub headers: Vec<(String, String)>,
+    pub basic_auth: Option<(String, String)>,
+}
+
+/// Parse a single `Name: Value` header argument.
+fn parse_header(raw: &str) -> Result<(String, String), DlmError> {
+    let (name, value) = raw.split_once(':').ok_or_else(|| CliArgumentError {
+        message: format!("invalid header '{raw}', expected 'Name: Value'"),
+    })?;
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() {
+        return Err(CliArgumentError {
+            message: format!("invalid header '{raw}', name cannot be empty"),
+        });
+    }
+    Ok((name.to_string(), value.to_string()))
+}
+
+/// Parse a `user:password` basic-auth argument. The password may contain colons.
+fn parse_basic_auth(raw: &str) -> Result<(String, String), DlmError> {
+    let (user, pass) = raw.split_once(':').ok_or_else(|| CliArgumentError {
+        message: "invalid '--user', expected 'user:password'".to_string(),
+    })?;
+    if user.is_empty() {
+        return Err(CliArgumentError {
+            message: "invalid '--user', user cannot be empty".to_string(),
+        });
+    }
+    Ok((user.to_string(), pass.to_string()))
 }
 
 pub fn get_args() -> Result<Arguments, DlmError> {
@@ -187,9 +224,19 @@ pub fn get_args() -> Result<Arguments, DlmError> {
         .copied()
         .expect("impossible");
 
-    let accept = matches.get_one::<String>("accept").cloned();
-
     let accept_invalid_certs = matches.get_flag("acceptInvalidCerts");
+
+    let headers = matches
+        .get_many::<String>("header")
+        .into_iter()
+        .flatten()
+        .map(|s| parse_header(s))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let basic_auth = matches
+        .get_one::<String>("user")
+        .map(|s| parse_basic_auth(s))
+        .transpose()?;
 
     Ok(Arguments {
         input,
@@ -199,8 +246,9 @@ pub fn get_args() -> Result<Arguments, DlmError> {
         proxy,
         retry,
         connection_timeout_secs,
-        accept,
         accept_invalid_certs,
+        headers,
+        basic_auth,
     })
 }
 
@@ -255,10 +303,12 @@ mod args_tests {
     --connection-timeout <connectionTimeoutSecs>
     Connection timeout in seconds
     [default: 10]
-    -a, --accept <accept>
-    Accept header value
     --accept-invalid-certs
     Accept invalid TLS certificates
+    -H, --header <header>
+    Custom request header (repeatable, format 'Name: Value')
+    --user <user>
+    Basic auth credentials in format 'user:password'
     -h, --help
     Print help
     -V, --version
@@ -266,5 +316,61 @@ mod args_tests {
     ",
         );
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn parse_header_ok() {
+        let (n, v) = super::parse_header("Authorization: Bearer xyz").unwrap();
+        assert_eq!(n, "Authorization");
+        assert_eq!(v, "Bearer xyz");
+    }
+
+    #[test]
+    fn parse_header_strips_whitespace() {
+        let (n, v) = super::parse_header("  X-Trace-Id  :  abc-123  ").unwrap();
+        assert_eq!(n, "X-Trace-Id");
+        assert_eq!(v, "abc-123");
+    }
+
+    #[test]
+    fn parse_header_value_with_colons() {
+        // Only the first colon is the delimiter — header values may contain colons.
+        let (n, v) = super::parse_header("X-Range: bytes=0-100:200").unwrap();
+        assert_eq!(n, "X-Range");
+        assert_eq!(v, "bytes=0-100:200");
+    }
+
+    #[test]
+    fn parse_header_no_colon_errors() {
+        assert!(super::parse_header("nocolon").is_err());
+    }
+
+    #[test]
+    fn parse_header_empty_name_errors() {
+        assert!(super::parse_header(": value").is_err());
+    }
+
+    #[test]
+    fn parse_basic_auth_ok() {
+        let (u, p) = super::parse_basic_auth("alice:s3cret").unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(p, "s3cret");
+    }
+
+    #[test]
+    fn parse_basic_auth_password_with_colons() {
+        let (u, p) = super::parse_basic_auth("alice:foo:bar").unwrap();
+        assert_eq!(u, "alice");
+        assert_eq!(p, "foo:bar");
+    }
+
+    #[test]
+    fn parse_basic_auth_empty_user_errors() {
+        assert!(super::parse_basic_auth(":pass").is_err());
+    }
+
+    #[test]
+    fn parse_basic_auth_no_colon_errors() {
+        assert!(super::parse_basic_auth("alice").is_err());
     }
 }

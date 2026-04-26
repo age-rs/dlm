@@ -11,8 +11,9 @@ mod utils;
 
 use crate::DlmError::EmptyInputFile;
 use crate::args::{Arguments, Input, get_args};
+use crate::client::ClientConfig;
 use crate::dlm_error::DlmError;
-use crate::downloader::{ClientConfig, DownloadContext};
+use crate::downloader::DownloadContext;
 use crate::progress_bar_manager::ProgressBarManager;
 use crate::retry::{retry_handler, retry_strategy};
 use futures_util::stream::StreamExt;
@@ -49,8 +50,9 @@ async fn main_result() -> Result<(), DlmError> {
         proxy,
         retry,
         connection_timeout_secs,
-        accept,
         accept_invalid_certs,
+        headers,
+        basic_auth,
     } = get_args()?;
 
     // setup interruption signal handler
@@ -77,7 +79,8 @@ async fn main_result() -> Result<(), DlmError> {
         proxy: proxy.as_deref(),
         connection_timeout_secs,
         accept_invalid_certs,
-        accept: accept.as_deref(),
+        basic_auth: basic_auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
+        headers: &headers,
     };
     let ctx = DownloadContext::new(&client_config, output_dir.as_path(), token, pbm)?;
     let ctx = &ctx;

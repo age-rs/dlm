@@ -9,23 +9,14 @@ use tokio::{fs as tfs, select};
 use tokio_util::sync::CancellationToken;
 
 use crate::ProgressBarManager;
-use crate::client::make_client;
+use crate::client::{ClientConfig, make_client};
 use crate::dlm_error::DlmError;
 use crate::file_link::FileLink;
 use crate::headers::{
     content_disposition_value, content_length_value, content_range_total_size, location_value,
     supports_range_bytes,
 };
-use crate::user_agents::UserAgent;
 use crate::utils::pretty_bytes_size;
-
-pub struct ClientConfig<'a> {
-    pub user_agent: Option<&'a UserAgent>,
-    pub proxy: Option<&'a str>,
-    pub connection_timeout_secs: u32,
-    pub accept_invalid_certs: bool,
-    pub accept: Option<&'a str>,
-}
 
 pub struct DownloadContext<'a> {
     client: Client,
@@ -43,25 +34,9 @@ impl<'a> DownloadContext<'a> {
         token: &'a CancellationToken,
         pb_manager: &'a ProgressBarManager,
     ) -> Result<Self, DlmError> {
-        let client = make_client(
-            client_config.user_agent,
-            client_config.proxy,
-            true,
-            client_config.connection_timeout_secs,
-            client_config.accept_invalid_certs,
-            client_config.accept,
-        )?;
-        let client_no_redirect = make_client(
-            client_config.user_agent,
-            client_config.proxy,
-            false,
-            client_config.connection_timeout_secs,
-            client_config.accept_invalid_certs,
-            client_config.accept,
-        )?;
         Ok(Self {
-            client,
-            client_no_redirect,
+            client: make_client(client_config, true)?,
+            client_no_redirect: make_client(client_config, false)?,
             connection_timeout_secs: client_config.connection_timeout_secs,
             output_dir,
             token,

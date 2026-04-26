@@ -327,6 +327,7 @@ name = "dlm"
 version = "0.6.1"
 dependencies = [
  "async-channel",
+ "base64",
  "clap",
  "futures-util",
  "indicatif",

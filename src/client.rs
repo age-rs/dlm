@@ -1,52 +1,82 @@
 use crate::dlm_error::DlmError;
 use crate::user_agents::{UserAgent, random_user_agent};
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Proxy};
 use std::time::Duration;
 
-pub fn make_client(
-    user_agent: Option<&UserAgent>,
-    proxy: Option<&str>,
-    redirect: bool,
-    connection_timeout_sec: u32,
-    accept_invalid_certs: bool,
-    accept: Option<&str>,
-) -> Result<Client, DlmError> {
-    let client_builder = Client::builder()
-        .connect_timeout(Duration::from_secs(u64::from(connection_timeout_sec)))
-        .danger_accept_invalid_certs(accept_invalid_certs);
+pub struct ClientConfig<'a> {
+    pub user_agent: Option<&'a UserAgent>,
+    pub proxy: Option<&'a str>,
+    pub connection_timeout_secs: u32,
+    pub accept_invalid_certs: bool,
+    pub basic_auth: Option<(&'a str, &'a str)>,
+    pub headers: &'a [(String, String)],
+}
 
-    // setup user-agent
-    let client_builder = match user_agent {
+pub fn make_client(config: &ClientConfig<'_>, redirect: bool) -> Result<Client, DlmError> {
+    let client_builder = Client::builder()
+        .connect_timeout(Duration::from_secs(u64::from(
+            config.connection_timeout_secs,
+        )))
+        .danger_accept_invalid_certs(config.accept_invalid_certs);
+
+    let client_builder = match config.user_agent {
         Some(UserAgent::CustomUserAgent(ua)) => client_builder.user_agent(ua),
         Some(UserAgent::RandomUserAgent) => client_builder.user_agent(random_user_agent()),
         None => client_builder,
     };
 
-    // setup proxy
-    let client_builder = match proxy {
+    let client_builder = match config.proxy {
         Some(p) => client_builder.proxy(Proxy::all(p)?),
-        _ => client_builder,
-    };
-
-    // setup default Accept header (sent on every request)
-    let client_builder = match accept.and_then(|a| HeaderValue::from_str(a).ok()) {
-        Some(value) => {
-            let mut headers = HeaderMap::new();
-            headers.insert(ACCEPT, value);
-            client_builder.default_headers(headers)
-        }
         None => client_builder,
     };
 
-    // setup redirect
+    // basic-auth goes in first so a custom `-H 'Authorization: …'` can override it.
+    let default_headers = build_default_headers(config)?;
+    let client_builder = if default_headers.is_empty() {
+        client_builder
+    } else {
+        client_builder.default_headers(default_headers)
+    };
+
     let client_builder = if redirect {
-        // defaults to 10 redirects
+        // reqwest defaults to 10 redirects
         client_builder.redirect(Policy::default())
     } else {
         client_builder.redirect(Policy::none())
     };
 
     Ok(client_builder.build()?)
+}
+
+fn build_default_headers(config: &ClientConfig<'_>) -> Result<HeaderMap, DlmError> {
+    let mut headers = HeaderMap::new();
+
+    if let Some((user, pass)) = config.basic_auth {
+        let encoded = BASE64.encode(format!("{user}:{pass}"));
+        let value = HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|e| {
+            DlmError::CliArgumentError {
+                message: format!("invalid basic-auth value: {e}"),
+            }
+        })?;
+        headers.insert(AUTHORIZATION, value);
+    }
+
+    for (name, value) in config.headers {
+        let header_name = name
+            .parse::<HeaderName>()
+            .map_err(|e| DlmError::CliArgumentError {
+                message: format!("invalid header name '{name}': {e}"),
+            })?;
+        let header_value =
+            HeaderValue::from_str(value).map_err(|e| DlmError::CliArgumentError {
+                message: format!("invalid header value for '{name}': {e}"),
+            })?;
+        headers.insert(header_name, header_value);
+    }
+
+    Ok(headers)
 }

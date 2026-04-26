@@ -33,6 +33,7 @@ thiserror = "2.0.18"
 rand = "0.10.1"
 jiff = "0.2.24"
 percent-encoding = "2.3.2"
+base64 = "0.22.1"
 
 [profile.release]
 lto = "fat"
