@@ -23,6 +23,8 @@ tokio = { version = "1.52.1", features = [
     "fs",
     "macros",
     "signal",
+    "process",
+    "time",
 ] }
 tokio-util = "0.7.18"
 tokio-retry = "0.3.1"
@@ -34,6 +36,10 @@ rand = "0.10.1"
 jiff = "0.2.24"
 percent-encoding = "2.3.2"
 base64 = "0.22.1"
+
+[dev-dependencies]
+axum = "0.8.9"
+tempfile = "3.27.0"
 
 [profile.release]
 lto = "fat"
