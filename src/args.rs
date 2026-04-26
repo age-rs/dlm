@@ -2,6 +2,7 @@ use crate::DlmError;
 use crate::DlmError::CliArgumentError;
 use crate::user_agents::UserAgent;
 use crate::user_agents::UserAgent::{CustomUserAgent, RandomUserAgent};
+use crate::user_agents::print_user_agents;
 use clap::{Arg, Command};
 use clap::{crate_authors, crate_description, crate_name, crate_version};
 use std::path::{Path, PathBuf};
@@ -58,6 +59,12 @@ fn command() -> Command {
                 .help("Use a random User-Agent header")
                 .long("random-user-agent")
                 .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("listUserAgents")
+                .help("Print the built-in User-Agent pool and exit")
+                .long("list-user-agents")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -160,6 +167,13 @@ fn parse_basic_auth(raw: &str) -> Result<(String, String), DlmError> {
 pub fn get_args() -> Result<Arguments, DlmError> {
     let command = command();
     let matches = command.get_matches();
+
+    // Print-and-exit flags handled before any URL/input validation,
+    // so `dlm --list-user-agents` works without other arguments.
+    if matches.get_flag("listUserAgents") {
+        print_user_agents();
+        std::process::exit(0);
+    }
 
     let max_concurrent_downloads: u32 = *matches
         .get_one("maxConcurrentDownloads")
@@ -296,6 +310,8 @@ mod args_tests {
     User-Agent header to use
     --random-user-agent
     Use a random User-Agent header
+    --list-user-agents
+    Print the built-in User-Agent pool and exit
     --proxy <proxy>
     HTTP proxy to use
     -r, --retry <retry>

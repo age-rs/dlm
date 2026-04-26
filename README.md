@@ -42,6 +42,8 @@ Options:
           User-Agent header to use
       --random-user-agent
           Use a random User-Agent header
+      --list-user-agents
+          Print the built-in User-Agent pool and exit
       --proxy <proxy>
           HTTP proxy to use
   -r, --retry <retry>

@@ -30,6 +30,15 @@ pub fn random_user_agent() -> &'static str {
     USER_AGENTS.choose(&mut rand::rng()).unwrap()
 }
 
+/// Print the built-in user-agent pool to stdout, one per numbered line.
+/// Useful so users can see what `--random-user-agent` rotates through, or
+/// pick a value to pass to `--user-agent`.
+pub fn print_user_agents() {
+    for (i, ua) in USER_AGENTS.iter().enumerate() {
+        println!("{:>2}  {ua}", i + 1);
+    }
+}
+
 #[cfg(test)]
 mod user_agent_tests {
     use super::*;
