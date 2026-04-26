@@ -7,6 +7,11 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Proxy};
 use std::time::Duration;
 
+/// Sent on every request when the user does not pass `--user-agent` or
+/// `--random-user-agent`. Identifies the tool to server admins (better than
+/// reqwest's generic default) without impersonating a browser.
+const DEFAULT_USER_AGENT: &str = concat!("dlm/", env!("CARGO_PKG_VERSION"));
+
 pub struct ClientConfig<'a> {
     pub user_agent: Option<&'a UserAgent>,
     pub proxy: Option<&'a str>,
@@ -26,7 +31,7 @@ pub fn make_client(config: &ClientConfig<'_>, redirect: bool) -> Result<Client, 
     let client_builder = match config.user_agent {
         Some(UserAgent::CustomUserAgent(ua)) => client_builder.user_agent(ua),
         Some(UserAgent::RandomUserAgent) => client_builder.user_agent(random_user_agent()),
-        None => client_builder,
+        None => client_builder.user_agent(DEFAULT_USER_AGENT),
     };
 
     let client_builder = match config.proxy {
