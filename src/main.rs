@@ -50,7 +50,7 @@ async fn main_result() -> Result<(), DlmError> {
         proxy,
         retry,
         connection_timeout_secs,
-        accept_invalid_certs,
+        insecure,
         headers,
         basic_auth,
     } = get_args()?;
@@ -78,7 +78,7 @@ async fn main_result() -> Result<(), DlmError> {
         user_agent: user_agent.as_ref(),
         proxy: proxy.as_deref(),
         connection_timeout_secs,
-        accept_invalid_certs,
+        insecure,
         basic_auth: basic_auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
         headers: &headers,
     };

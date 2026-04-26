@@ -48,7 +48,7 @@ Options:
           Number of retries on network error [default: 10]
       --connection-timeout <connectionTimeoutSecs>
           Connection timeout in seconds [default: 10]
-      --accept-invalid-certs
+  -k, --insecure
           Accept invalid TLS certificates
   -H, --header <header>
           Custom request header (repeatable, format 'Name: Value')

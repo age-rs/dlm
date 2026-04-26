@@ -87,9 +87,10 @@ fn command() -> Command {
                 .required(false),
         )
         .arg(
-            Arg::new("acceptInvalidCerts")
+            Arg::new("insecure")
                 .help("Accept invalid TLS certificates")
-                .long("accept-invalid-certs")
+                .long("insecure")
+                .short('k')
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -123,7 +124,7 @@ pub struct Arguments {
     pub proxy: Option<String>,
     pub retry: u32,
     pub connection_timeout_secs: u32,
-    pub accept_invalid_certs: bool,
+    pub insecure: bool,
     pub headers: Vec<(String, String)>,
     pub basic_auth: Option<(String, String)>,
 }
@@ -224,7 +225,7 @@ pub fn get_args() -> Result<Arguments, DlmError> {
         .copied()
         .expect("impossible");
 
-    let accept_invalid_certs = matches.get_flag("acceptInvalidCerts");
+    let insecure = matches.get_flag("insecure");
 
     let headers = matches
         .get_many::<String>("header")
@@ -246,7 +247,7 @@ pub fn get_args() -> Result<Arguments, DlmError> {
         proxy,
         retry,
         connection_timeout_secs,
-        accept_invalid_certs,
+        insecure,
         headers,
         basic_auth,
     })
@@ -303,7 +304,7 @@ mod args_tests {
     --connection-timeout <connectionTimeoutSecs>
     Connection timeout in seconds
     [default: 10]
-    --accept-invalid-certs
+    -k, --insecure
     Accept invalid TLS certificates
     -H, --header <header>
     Custom request header (repeatable, format 'Name: Value')

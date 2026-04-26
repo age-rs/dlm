@@ -11,7 +11,7 @@ pub struct ClientConfig<'a> {
     pub user_agent: Option<&'a UserAgent>,
     pub proxy: Option<&'a str>,
     pub connection_timeout_secs: u32,
-    pub accept_invalid_certs: bool,
+    pub insecure: bool,
     pub basic_auth: Option<(&'a str, &'a str)>,
     pub headers: &'a [(String, String)],
 }
@@ -21,7 +21,7 @@ pub fn make_client(config: &ClientConfig<'_>, redirect: bool) -> Result<Client, 
         .connect_timeout(Duration::from_secs(u64::from(
             config.connection_timeout_secs,
         )))
-        .danger_accept_invalid_certs(config.accept_invalid_certs);
+        .danger_accept_invalid_certs(config.insecure);
 
     let client_builder = match config.user_agent {
         Some(UserAgent::CustomUserAgent(ua)) => client_builder.user_agent(ua),
