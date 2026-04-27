@@ -1,6 +1,62 @@
 use crate::dlm_error::DlmError;
 use percent_encoding::percent_decode_str;
 
+/// Base names Windows reserves for legacy device files; we suffix `_` to dodge
+/// them. Matched case-insensitively.
+const FORBIDDEN_WINDOWS_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Cap on filename byte length — most filesystems (ext4, NTFS, APFS) reject
+/// single components longer than this.
+const MAX_FILENAME_BYTES: usize = 255;
+
+/// Returns a filename that is safe to use on Windows, Linux, and macOS.
+///
+/// - Replaces `/ \ : * ? " < > | ^` with `_` (forbidden on Windows; `/` and
+///   `:` also break paths on Unix-likes).
+/// - Replaces ASCII control characters with `_`.
+/// - Trims trailing dots and whitespace (Windows rejects either).
+/// - Trims leading whitespace, but keeps leading dots so hidden files like
+///   `.gitignore` survive.
+/// - Suffixes Windows reserved device names (CON, PRN, AUX, NUL, COM1-9,
+///   LPT1-9) with `_`.
+/// - Truncates to 255 bytes at a UTF-8 char boundary.
+///
+/// Does not strip path components — callers handling header-supplied names
+/// must run `Path::new(input).file_name()` first to defeat `../`-style
+/// traversal.
+pub fn cleanup_filename(input: &str) -> String {
+    let mut result: String = input
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '^' => '_',
+            c if c.is_control() => '_',
+            _ => c,
+        })
+        .collect();
+
+    let trimmed_end = result.trim_end_matches(|c: char| c.is_whitespace() || c == '.');
+    let trimmed = trimmed_end.trim_start_matches(char::is_whitespace);
+    result = trimmed.to_string();
+
+    let upper = result.to_ascii_uppercase();
+    if FORBIDDEN_WINDOWS_NAMES.iter().any(|&name| name == upper) {
+        result.push('_');
+    }
+
+    if result.len() > MAX_FILENAME_BYTES {
+        let mut end = MAX_FILENAME_BYTES;
+        while end > 0 && !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result.truncate(end);
+    }
+
+    result
+}
+
 #[derive(Debug)]
 pub struct FileLink {
     pub url: String,
@@ -12,50 +68,62 @@ impl FileLink {
     pub fn new(url: &str) -> Result<Self, DlmError> {
         let trimmed = url.trim();
         if trimmed.is_empty() {
-            Err(DlmError::other(
+            return Err(DlmError::other(
                 "FileLink cannot be built from an empty URL".to_string(),
-            ))
-        } else if trimmed.ends_with('/') {
-            let message = format!("FileLink cannot be built with an invalid extension '{trimmed}'");
-            Err(DlmError::other(message))
-        } else {
-            // Split BEFORE decoding so an encoded '/' (%2F) inside a path
-            // segment is not mistaken for a separator.
-            let last_segment = url.rsplit_once('/').map_or(url, |(_, s)| s);
-            let decoded = percent_decode_str(last_segment).decode_utf8_lossy();
-            // A decoded segment may still contain '/' or '\\' (from %2F / %5C);
-            // those are path separators on disk, replace them.
-            let safe_name = decoded.replace(['/', '\\'], "_");
-            let (extension, filename_without_extension) =
-                Self::extract_extension_from_filename(&safe_name);
-
-            let file_link = Self {
-                url: url.to_string(),
-                filename_without_extension,
-                extension,
-            };
-            Ok(file_link)
+            ));
         }
+
+        let parsed = reqwest::Url::parse(trimmed).map_err(|e| {
+            DlmError::other(format!("FileLink could not parse URL '{trimmed}': {e}"))
+        })?;
+
+        // `path_segments` keeps segments percent-encoded; we decode after the
+        // split so a literal '%2F' inside a segment is not mistaken for a
+        // path separator. Query and fragment are already separated by the
+        // parser, so we don't need to strip them ourselves.
+        let last_segment = parsed
+            .path_segments()
+            .and_then(|mut s| s.next_back())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                DlmError::other(format!(
+                    "FileLink cannot be built with an invalid extension '{trimmed}'"
+                ))
+            })?;
+        let decoded = percent_decode_str(last_segment).decode_utf8_lossy();
+        let safe_name = cleanup_filename(&decoded);
+        if safe_name.is_empty() {
+            let message = format!("FileLink could not derive a usable filename from '{trimmed}'");
+            return Err(DlmError::other(message));
+        }
+
+        let (extension, filename_without_extension) =
+            Self::extract_extension_from_filename(&safe_name);
+
+        Ok(Self {
+            url: url.to_string(),
+            filename_without_extension,
+            extension,
+        })
     }
 
     pub fn filename(&self) -> String {
-        match &self.extension {
+        let joined = match &self.extension {
             Some(ext) => format!("{}.{ext}", self.filename_without_extension),
             None => self.filename_without_extension.clone(),
-        }
+        };
+        // Re-run cleanup on the joined name so the combined byte length still
+        // fits the 255-byte limit when the extension pushes over.
+        cleanup_filename(&joined)
     }
 
+    /// Splits a filename on its rightmost `.`. Assumes the input is already
+    /// sanitized via `cleanup_filename`.
     pub fn extract_extension_from_filename(filename: &str) -> (Option<String>, String) {
         if let Some((before, after)) = filename.rsplit_once('.') {
-            // remove potential query params from extension
-            let ext = after.split('?').next().unwrap_or(after);
-            (Some(ext.to_string()), before.to_string())
+            (Some(after.to_string()), before.to_string())
         } else {
-            // no extension found, the file name will be used
-            // sanitize as it contains query params
-            // which are not allowed in filenames on some OS
-            let sanitized = filename.replace(['?', '&'], "-");
-            (None, sanitized)
+            (None, filename.to_string())
         }
     }
 }
@@ -110,14 +178,12 @@ mod file_link_tests {
     }
 
     #[test]
-    fn no_extension_use_query_params() {
+    fn no_extension_query_string_stripped() {
+        // Query string is not part of the filename; we drop it.
         let url = "https://oeis.org/search?q=id:A000001&fmt=json";
         let fl = FileLink::new(url).unwrap();
         assert_eq!(fl.extension, None);
-        assert_eq!(
-            fl.filename_without_extension,
-            "search-q=id:A000001-fmt=json"
-        );
+        assert_eq!(fl.filename_without_extension, "search");
         assert_eq!(fl.url, url);
     }
 
@@ -155,8 +221,7 @@ mod file_link_tests {
         let fl = FileLink::new(url).unwrap();
         assert_eq!(fl.extension, Some("deb".to_string()));
         assert_eq!(fl.url, url);
-        // FIXME
-        //assert_eq!(fl.filename_without_extension, "atom-amd64");
+        assert_eq!(fl.filename_without_extension, "atom-amd64");
     }
 
     #[test]
@@ -185,5 +250,106 @@ mod file_link_tests {
         assert_eq!(fl.extension, Some("pdf".to_string()));
         // '/' is sanitized to '_' so the name remains usable on disk.
         assert_eq!(fl.filename_without_extension, "My_Report");
+    }
+
+    #[test]
+    fn fragment_in_url_is_stripped() {
+        let url = "https://example.com/file.bin#section";
+        let fl = FileLink::new(url).unwrap();
+        assert_eq!(fl.extension, Some("bin".to_string()));
+        assert_eq!(fl.filename_without_extension, "file");
+    }
+
+    #[test]
+    fn cleanup_replaces_forbidden_chars() {
+        assert_eq!(
+            cleanup_filename("a:b*c?d|e\"f<g>h^i.txt"),
+            "a_b_c_d_e_f_g_h_i.txt"
+        );
+        assert_eq!(
+            cleanup_filename("path/with\\separators.bin"),
+            "path_with_separators.bin"
+        );
+    }
+
+    #[test]
+    fn cleanup_replaces_control_chars() {
+        assert_eq!(cleanup_filename("a\u{0}b\u{1}c\u{1f}d.txt"), "a_b_c_d.txt");
+    }
+
+    #[test]
+    fn cleanup_trims_trailing_dots_and_whitespace() {
+        assert_eq!(cleanup_filename("file.txt..  "), "file.txt");
+        assert_eq!(cleanup_filename("file.txt   "), "file.txt");
+        assert_eq!(cleanup_filename("file.txt."), "file.txt");
+    }
+
+    #[test]
+    fn cleanup_trims_leading_whitespace_only() {
+        assert_eq!(cleanup_filename("   file.txt"), "file.txt");
+        // Leading dots are kept — they are needed for hidden files on Unix.
+        assert_eq!(cleanup_filename(".gitignore"), ".gitignore");
+        assert_eq!(cleanup_filename("..hidden.txt"), "..hidden.txt");
+    }
+
+    #[test]
+    fn cleanup_collapses_to_empty_for_dots_only() {
+        assert_eq!(cleanup_filename(".."), "");
+        assert_eq!(cleanup_filename("..."), "");
+        assert_eq!(cleanup_filename("   "), "");
+    }
+
+    #[test]
+    fn cleanup_escapes_windows_reserved_names() {
+        assert_eq!(cleanup_filename("CON"), "CON_");
+        assert_eq!(cleanup_filename("nul"), "nul_");
+        assert_eq!(cleanup_filename("LPT3"), "LPT3_");
+        assert_eq!(cleanup_filename("aux"), "aux_");
+    }
+
+    #[test]
+    fn cleanup_truncates_to_255_bytes() {
+        let cleaned = cleanup_filename(&"a".repeat(300));
+        assert_eq!(cleaned.len(), 255);
+    }
+
+    #[test]
+    fn cleanup_truncates_at_utf8_char_boundary() {
+        // Each 'ä' is 2 bytes; 200 of them = 400 bytes, well over 255.
+        let cleaned = cleanup_filename(&"ä".repeat(200));
+        assert!(cleaned.len() <= 255);
+        // String::truncate panics on a non-boundary, so this implicitly
+        // confirms we landed on one — assert it explicitly anyway.
+        assert!(cleaned.is_char_boundary(cleaned.len()));
+    }
+
+    #[test]
+    fn new_errors_when_segment_collapses_to_empty() {
+        // Last segment "..." is not a special path component so the URL
+        // parser keeps it as-is, but cleanup trims trailing dots and the
+        // result is empty.
+        let url = "https://example.com/files/...";
+        match FileLink::new(url) {
+            Err(DlmError::Other { message }) => {
+                assert!(
+                    message.contains("could not derive a usable filename"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Other error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_errors_on_unparseable_url() {
+        match FileLink::new("not-a-url") {
+            Err(DlmError::Other { message }) => {
+                assert!(
+                    message.contains("could not parse URL"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Other error, got {other:?}"),
+        }
     }
 }

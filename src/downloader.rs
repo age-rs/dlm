@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ProgressBarManager;
 use crate::client::{ClientConfig, make_client};
 use crate::dlm_error::DlmError;
-use crate::file_link::FileLink;
+use crate::file_link::{FileLink, cleanup_filename};
 use crate::headers::{
     content_disposition_value, content_length_value, content_range_total_size, location_value,
     supports_range_bytes,
@@ -410,15 +410,17 @@ fn parse_filename_header(content_disposition: &str) -> Option<String> {
     None
 }
 
-/// Strip path components to prevent directory traversal attacks.
-/// A malicious server could send `Content-Disposition: attachment; filename="../../etc/evil"`.
+/// Strip path components to prevent directory traversal attacks (a malicious
+/// server could send `Content-Disposition: attachment; filename="../../etc/evil"`)
+/// then run the standard filename cleanup so forbidden chars, control chars,
+/// trailing dots/whitespace, and Windows reserved names are all neutralised.
 fn sanitize_filename(name: &str) -> Option<String> {
-    // Use Path to extract just the file name, stripping any directory components
     let file_name = Path::new(name).file_name()?.to_str()?;
-    if file_name.is_empty() {
+    let cleaned = cleanup_filename(file_name);
+    if cleaned.is_empty() {
         None
     } else {
-        Some(file_name.to_string())
+        Some(cleaned)
     }
 }
 
@@ -509,6 +511,33 @@ mod downloader_tests {
     fn parse_filename_header_absolute_path() {
         let header = "attachment; filename=\"/tmp/evil.sh\"";
         assert_eq!(parse_filename_header(header), Some("evil.sh".to_owned()));
+    }
+
+    #[test]
+    fn parse_filename_header_strips_forbidden_chars() {
+        let header = "attachment; filename=\"weird:name*?.txt\"";
+        assert_eq!(
+            parse_filename_header(header),
+            Some("weird_name__.txt".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_filename_header_trims_trailing_dot() {
+        let header = "attachment; filename=\"report.\"";
+        assert_eq!(parse_filename_header(header), Some("report".to_owned()));
+    }
+
+    #[test]
+    fn parse_filename_header_windows_reserved_name_escaped() {
+        let header = "attachment; filename=\"CON\"";
+        assert_eq!(parse_filename_header(header), Some("CON_".to_owned()));
+    }
+
+    #[test]
+    fn parse_filename_header_dots_only_is_none() {
+        let header = "attachment; filename=\"...\"";
+        assert_eq!(parse_filename_header(header), None);
     }
 
     #[test]
