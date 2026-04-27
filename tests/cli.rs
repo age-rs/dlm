@@ -223,7 +223,8 @@ async fn retry_then_succeed_on_transient_500s() {
     server.set_flaky_fails(2); // first 2 requests get 503, then it works.
     let url = server.url("/flaky");
 
-    // The retry strategy starts at 10ms, so two retries are quick.
+    // The polite retry strategy waits 500ms between fixed attempts, so two
+    // retries take ~1s — slow enough to be visible, fast enough for CI.
     let (r, dir) = run_dlm(&[&url]).await;
 
     assert_eq!(r.code, 0, "{r}");

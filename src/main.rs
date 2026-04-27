@@ -15,12 +15,11 @@ use crate::client::ClientConfig;
 use crate::dlm_error::DlmError;
 use crate::downloader::DownloadContext;
 use crate::progress_bar_manager::ProgressBarManager;
-use crate::retry::{retry_handler, retry_strategy};
+use crate::retry::{retry_handler, retry_strategy, with_retries};
 use futures_util::stream::StreamExt;
 use std::pin::Pin;
 use tokio::io::AsyncBufReadExt;
 use tokio::{fs as tfs, signal};
-use tokio_retry::RetryIf;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::LinesStream;
 use tokio_util::sync::CancellationToken;
@@ -161,11 +160,9 @@ async fn process_downloads(
                         // claim a progress bar for the upcoming download
                         let dl_pb = pbm.claim_progress_bar().await;
 
-                        // exponential backoff retries for network errors
-                        let retry_strategy = retry_strategy(retry);
-
-                        let processed = RetryIf::spawn(
-                            retry_strategy,
+                        // polite fixed-then-exponential retries for network errors
+                        let processed = with_retries(
+                            retry_strategy(retry),
                             || ctx.download_link(&link, &dl_pb),
                             |e: &DlmError| retry_handler(e, pbm, &link),
                         )
