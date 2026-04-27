@@ -81,23 +81,30 @@ impl FileLink {
         // split so a literal '%2F' inside a segment is not mistaken for a
         // path separator. Query and fragment are already separated by the
         // parser, so we don't need to strip them ourselves.
-        let last_segment = parsed
+        let path_part = parsed
             .path_segments()
             .and_then(|mut s| s.next_back())
-            .filter(|s| !s.is_empty());
-        // When the path yields no usable segment (e.g. `https://host/?…`), fall
-        // back to the query string. This produces a placeholder filename that
-        // gets overridden later by Content-Disposition or the redirect target.
-        let raw_name = match last_segment {
-            Some(s) => percent_decode_str(s).decode_utf8_lossy().into_owned(),
-            None => match parsed.query().filter(|q| !q.is_empty()) {
-                Some(q) => percent_decode_str(q).decode_utf8_lossy().into_owned(),
-                None => {
-                    return Err(DlmError::other(format!(
-                        "FileLink cannot be built with an invalid extension '{trimmed}'"
-                    )));
-                }
-            },
+            .filter(|s| !s.is_empty())
+            .map(|s| percent_decode_str(s).decode_utf8_lossy().into_owned());
+        let query = parsed.query().filter(|q| !q.is_empty());
+        // When the path yields a name with an extension we drop the query —
+        // it's noise that doesn't help disambiguate. When the path has no
+        // extension (or no segment at all), keep the query so URLs that
+        // differ only in their parameters don't collide on the same
+        // placeholder filename. The real name still gets overridden later by
+        // Content-Disposition or the redirect target when those are present.
+        let raw_name = match (path_part, query) {
+            (Some(p), Some(q)) if !p.contains('.') => {
+                let q_decoded = percent_decode_str(q).decode_utf8_lossy();
+                format!("{p}?{q_decoded}")
+            }
+            (Some(p), _) => p,
+            (None, Some(q)) => percent_decode_str(q).decode_utf8_lossy().into_owned(),
+            (None, None) => {
+                return Err(DlmError::other(format!(
+                    "FileLink cannot be built with an invalid extension '{trimmed}'"
+                )));
+            }
         };
         let safe_name = cleanup_filename(&raw_name);
         if safe_name.is_empty() {
@@ -186,13 +193,34 @@ mod file_link_tests {
     }
 
     #[test]
-    fn no_extension_query_string_stripped() {
-        // Query string is not part of the filename; we drop it.
+    fn no_extension_query_string_kept() {
+        // No extension on the path → the query is preserved (sanitized) so
+        // URLs that share a path stem but differ in their parameters don't
+        // collide on the same placeholder filename.
         let url = "https://oeis.org/search?q=id:A000001&fmt=json";
         let fl = FileLink::new(url).unwrap();
         assert_eq!(fl.extension, None);
-        assert_eq!(fl.filename_without_extension, "search");
+        assert_eq!(
+            fl.filename_without_extension,
+            "search_q=id_A000001&fmt=json"
+        );
         assert_eq!(fl.url, url);
+    }
+
+    #[test]
+    fn no_extension_query_string_disambiguates() {
+        // Two URLs that share a path stem and differ only in their query
+        // parameters must produce different placeholder filenames. Otherwise
+        // the downloader's "skip if final exists" check silently turns the
+        // second download into a no-op against the first URL's content when
+        // neither URL serves a Content-Disposition header or redirect.
+        let fl1 = FileLink::new("https://api.example.com/get?id=1").unwrap();
+        let fl2 = FileLink::new("https://api.example.com/get?id=2").unwrap();
+        assert_ne!(
+            fl1.filename(),
+            fl2.filename(),
+            "URLs differing only in query params must not collide on the placeholder filename"
+        );
     }
 
     #[test]
