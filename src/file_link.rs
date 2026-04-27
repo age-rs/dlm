@@ -84,14 +84,22 @@ impl FileLink {
         let last_segment = parsed
             .path_segments()
             .and_then(|mut s| s.next_back())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                DlmError::other(format!(
-                    "FileLink cannot be built with an invalid extension '{trimmed}'"
-                ))
-            })?;
-        let decoded = percent_decode_str(last_segment).decode_utf8_lossy();
-        let safe_name = cleanup_filename(&decoded);
+            .filter(|s| !s.is_empty());
+        // When the path yields no usable segment (e.g. `https://host/?…`), fall
+        // back to the query string. This produces a placeholder filename that
+        // gets overridden later by Content-Disposition or the redirect target.
+        let raw_name = match last_segment {
+            Some(s) => percent_decode_str(s).decode_utf8_lossy().into_owned(),
+            None => match parsed.query().filter(|q| !q.is_empty()) {
+                Some(q) => percent_decode_str(q).decode_utf8_lossy().into_owned(),
+                None => {
+                    return Err(DlmError::other(format!(
+                        "FileLink cannot be built with an invalid extension '{trimmed}'"
+                    )));
+                }
+            },
+        };
+        let safe_name = cleanup_filename(&raw_name);
         if safe_name.is_empty() {
             let message = format!("FileLink could not derive a usable filename from '{trimmed}'");
             return Err(DlmError::other(message));
@@ -250,6 +258,33 @@ mod file_link_tests {
         assert_eq!(fl.extension, Some("pdf".to_string()));
         // '/' is sanitized to '_' so the name remains usable on disk.
         assert_eq!(fl.filename_without_extension, "My_Report");
+    }
+
+    #[test]
+    fn empty_path_falls_back_to_query() {
+        // No usable path segment — the query is used as a placeholder name.
+        // The real filename comes from Content-Disposition or the redirect.
+        let url = "https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US";
+        let fl = FileLink::new(url).unwrap();
+        assert_eq!(fl.url, url);
+        assert_eq!(fl.extension, None);
+        assert_eq!(
+            fl.filename_without_extension,
+            "product=firefox-latest-ssl&os=osx&lang=en-US"
+        );
+    }
+
+    #[test]
+    fn empty_path_no_query_errors() {
+        // No path and no query — there is nothing to derive a name from.
+        let url = "https://example.com/";
+        match FileLink::new(url) {
+            Err(DlmError::Other { message }) => assert!(
+                message.contains("invalid extension"),
+                "unexpected message: {message}"
+            ),
+            other => panic!("expected error, got {other:?}"),
+        }
     }
 
     #[test]
