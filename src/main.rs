@@ -188,15 +188,18 @@ async fn process_downloads(
             if token.is_cancelled() {
                 return;
             }
-            let message = match link_res {
+            // Each arm logs at its own level - an outcome and a failure do not
+            // read the same - and reports whether the link reached a verdict.
+            let link_processed = match link_res {
                 Err(e) => {
                     // a link that could not even be read cannot be downloaded
                     stats.record_failed();
-                    Some(format!("Error with links iterator {e}"))
+                    pbm.error_above_progress_bars(&format!("Error with links iterator {e}"));
+                    true
                 }
                 Ok(link) => {
                     if is_empty_line(&link) {
-                        None
+                        false
                     } else {
                         // claim a progress bar for the upcoming download
                         let dl_pb = pbm.claim_progress_bar().await;
@@ -218,21 +221,22 @@ async fn process_downloads(
                                     DownloadOutcome::Completed(_) => stats.record_completed(),
                                     DownloadOutcome::Skipped(_) => stats.record_skipped(),
                                 }
-                                Some(outcome.into_message())
+                                pbm.log_above_progress_bars(&outcome.into_message());
+                                true
                             }
                             // an interrupted download is not a failure, the run
                             // is being torn down and already exits non-zero
-                            Err(DlmError::ProgramInterrupted) => None,
+                            Err(DlmError::ProgramInterrupted) => false,
                             Err(e) => {
                                 stats.record_failed();
-                                Some(format!("Error for {link}: {e}"))
+                                pbm.error_above_progress_bars(&format!("Error for {link}: {e}"));
+                                true
                             }
                         }
                     }
                 }
             };
-            if let Some(message) = message {
-                pbm.log_above_progress_bars(&message);
+            if link_processed {
                 pbm.increment_global_progress();
             }
         })

@@ -1,5 +1,6 @@
 use crate::DlmError;
 use async_channel::{Receiver, Sender};
+use console::style;
 use indicatif::{
     HumanBytes, HumanDuration, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressState,
     ProgressStyle,
@@ -182,9 +183,29 @@ impl ProgressBarManager {
     /// Logging goes through the `MultiProgress` rather than any single bar, so
     /// it lands above whichever bars are on screen - there is not always a
     /// main one to hang it off.
-    pub fn log_above_progress_bars(&self, msg: &str) {
+    ///
+    /// The timestamp stays uncoloured; only the message carries the level, so
+    /// the left margin reads evenly down the log.
+    fn log_at(&self, msg: impl std::fmt::Display) {
         let now = Zoned::now().strftime("%Y-%m-%d %H:%M:%S");
         let _ = self.mp.println(format!("[{now}] {msg}"));
+    }
+
+    /// Ordinary progress: what was downloaded, skipped, or is starting.
+    pub fn log_above_progress_bars(&self, msg: &str) {
+        self.log_at(msg);
+    }
+
+    /// Something the run worked around - a download restarted from scratch, a
+    /// server that would not answer properly, a completeness check that could
+    /// not be made. Worth noticing, but the run carries on.
+    pub fn warn_above_progress_bars(&self, msg: &str) {
+        self.log_at(style(msg).yellow());
+    }
+
+    /// A link that will not produce a file.
+    pub fn error_above_progress_bars(&self, msg: &str) {
+        self.log_at(style(msg).red());
     }
 
     /// Print the end-of-run report, once the progress bars are finished.

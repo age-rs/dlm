@@ -79,7 +79,7 @@ impl<'a> DownloadContext<'a> {
 
         // HEAD outright rejected → derive the whole triple from a ranged GET.
         if head_status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
-            self.pb_manager.log_above_progress_bars(&format!(
+            self.pb_manager.warn_above_progress_bars(&format!(
                 "HEAD returned 405 for {url}, falling back to GET for metadata"
             ));
             return self.metadata_from_probe(url).await;
@@ -130,7 +130,7 @@ impl<'a> DownloadContext<'a> {
     ) -> Result<(Option<u64>, bool), DlmError> {
         let probe = self.range_probe(url).await?;
         if !probe.status().is_success() {
-            self.pb_manager.log_above_progress_bars(&format!(
+            self.pb_manager.warn_above_progress_bars(&format!(
                 "GET fallback for metadata returned {} for {url}, proceeding without content-length",
                 probe.status()
             ));
@@ -247,7 +247,7 @@ impl<'a> DownloadContext<'a> {
                 let log = format!(
                     "Server ignored the range request for {filename} and answered {status}, restarting the download from scratch"
                 );
-                self.pb_manager.log_above_progress_bars(&log);
+                self.pb_manager.warn_above_progress_bars(&log);
                 prime_position(pb_dl, 0);
                 false
             }
@@ -322,7 +322,7 @@ impl<'a> DownloadContext<'a> {
                 });
             }
             None => {
-                self.pb_manager.log_above_progress_bars(&format!(
+                self.pb_manager.warn_above_progress_bars(&format!(
                     "No Content-Length available for {}, cannot verify download completeness",
                     filename
                 ));
@@ -352,7 +352,7 @@ impl<'a> DownloadContext<'a> {
                 "Could not determine file extension based on header {filename} for {}",
                 file_link.url
             );
-            self.pb_manager.log_above_progress_bars(&msg);
+            self.pb_manager.warn_above_progress_bars(&msg);
             return Ok(());
         }
 
@@ -363,7 +363,7 @@ impl<'a> DownloadContext<'a> {
         {
             None => {
                 let msg = format!("No extension found for {}", file_link.url);
-                self.pb_manager.log_above_progress_bars(&msg);
+                self.pb_manager.warn_above_progress_bars(&msg);
             }
             Some(fl) => {
                 file_link.extension = fl.extension;
@@ -439,7 +439,7 @@ async fn compute_resume_action(
                 "The download of file {} should not be interrupted because the server does not support resuming the download (range bytes)",
                 tmp_name.display()
             );
-            pb_manager.log_above_progress_bars(&log);
+            pb_manager.warn_above_progress_bars(&log);
         }
         return Ok(ResumeAction::Fresh);
     }
@@ -459,7 +459,7 @@ async fn compute_resume_action(
                     "Found part file {} with size {tmp_size} larger than the expected {cl} bytes, restarting the download from scratch",
                     tmp_name.display()
                 );
-                pb_manager.log_above_progress_bars(&log);
+                pb_manager.warn_above_progress_bars(&log);
                 prime_position(pb_dl, 0);
                 Ok(ResumeAction::Fresh)
             }
@@ -480,7 +480,7 @@ async fn compute_resume_action(
                 "Found part file {} with size {tmp_size} but it will be overridden because the server did not report a content length",
                 tmp_name.display()
             );
-            pb_manager.log_above_progress_bars(&log);
+            pb_manager.warn_above_progress_bars(&log);
             prime_position(pb_dl, 0);
             Ok(ResumeAction::Fresh)
         }
@@ -490,7 +490,7 @@ async fn compute_resume_action(
                 "Found part file {} with size {tmp_size} but it will be overridden because the server does not support resuming the download (range bytes)",
                 tmp_name.display()
             );
-            pb_manager.log_above_progress_bars(&log);
+            pb_manager.warn_above_progress_bars(&log);
             prime_position(pb_dl, 0);
             Ok(ResumeAction::Fresh)
         }
