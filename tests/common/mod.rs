@@ -46,6 +46,9 @@ struct ServerState {
     /// what dlm actually sent. `std::sync::Mutex` is fine here — the lock is
     /// never held across an `.await`.
     last_echo_headers: Arc<Mutex<Option<HeaderMap>>>,
+    /// Number of GETs served by `/ignore-range`, so a test can assert the
+    /// body was fetched once rather than downloaded twice.
+    ignore_range_gets: Arc<AtomicU32>,
     /// Origin URL the server is reachable at, e.g. "http://127.0.0.1:12345".
     /// Set once at startup; immutable thereafter, hence `Arc<str>` (no lock).
     origin: Arc<str>,
@@ -63,6 +66,7 @@ impl TestServer {
         let state = ServerState {
             flaky_remaining: Arc::new(AtomicU32::new(0)),
             last_echo_headers: Arc::new(Mutex::new(None)),
+            ignore_range_gets: Arc::new(AtomicU32::new(0)),
             origin: Arc::from(format!("http://{addr}")),
         };
 
@@ -85,6 +89,7 @@ impl TestServer {
             .route("/cut-stream/{name}", any(cut_stream_mid_body))
             .route("/stall/{name}", any(stall_before_headers))
             .route("/slow-first-byte/{name}", any(slow_first_byte))
+            .route("/ignore-range/{name}", any(ignore_range))
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -110,6 +115,11 @@ impl TestServer {
     /// Make `/flaky` return 503 the next `n` times, then succeed.
     pub fn set_flaky_fails(&self, n: u32) {
         self.state.flaky_remaining.store(n, Ordering::SeqCst);
+    }
+
+    /// How many times `/ignore-range` served the body.
+    pub fn ignore_range_get_count(&self) -> u32 {
+        self.state.ignore_range_gets.load(Ordering::SeqCst)
     }
 }
 
@@ -205,6 +215,29 @@ async fn flaky(State(state): State<ServerState>, headers: HeaderMap) -> Response
 
 async fn always_404() -> Response {
     StatusCode::NOT_FOUND.into_response()
+}
+
+/// Advertises `Accept-Ranges: bytes` on HEAD but ignores `Range` on GET,
+/// answering `200` with the whole body — a real-world server quirk. dlm must
+/// notice the reply is not `206` and replace the `.part` instead of appending
+/// to it. Counts the GETs so a test can prove the body travels only once.
+async fn ignore_range(
+    method: Method,
+    _path: Path<String>,
+    State(state): State<ServerState>,
+) -> Response {
+    if method == Method::HEAD {
+        return head_metadata(FILE_BODY);
+    }
+    state.ignore_range_gets.fetch_add(1, Ordering::SeqCst);
+    let mut resp = Response::new(Body::from(FILE_BODY));
+    let h = resp.headers_mut();
+    h.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&FILE_BODY.len().to_string()).unwrap(),
+    );
+    h.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    resp
 }
 
 /// HEAD claims `Content-Length: FILE_BODY.len()`; GET serves only half. dlm

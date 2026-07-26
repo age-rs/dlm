@@ -203,30 +203,49 @@ impl<'a> DownloadContext<'a> {
                 .await;
         }
 
-        // create/open file.part
-        // no need for a BufWriter because the HTTP chunks are rather large
-        let mut file = match &resume_action {
-            ResumeAction::Resume(_) => {
-                tfs::OpenOptions::new()
-                    .append(true)
-                    .create(false)
-                    .open(&tmp_name)
-                    .await?
-            }
-            // Fresh: truncate any stale .part (AlreadyComplete handled above).
-            _ => tfs::File::create(&tmp_name).await?,
-        };
-
         // build and send the download request
         let mut request = self.client.get(&file_link.url);
         if let ResumeAction::Resume(range) = &resume_action {
             request = request.header(RANGE, range);
         }
         let mut dl_response = request.send().await?;
-        if !dl_response.status().is_success() {
-            let status_code = dl_response.status().as_u16();
-            return Err(DlmError::ResponseStatusNotSuccess { status_code });
+        let status = dl_response.status();
+        if !status.is_success() {
+            return Err(DlmError::ResponseStatusNotSuccess {
+                status_code: status.as_u16(),
+            });
         }
+
+        // A resume only holds if the server actually answers with a partial
+        // body. Some servers advertise `Accept-Ranges` on HEAD yet ignore the
+        // `Range` header on GET and reply `200` with the whole resource:
+        // appending that to the `.part` would corrupt it, so the download
+        // restarts from scratch instead.
+        let append_to_part = match &resume_action {
+            ResumeAction::Resume(_) if status == reqwest::StatusCode::PARTIAL_CONTENT => true,
+            ResumeAction::Resume(_) => {
+                let log = format!(
+                    "Server ignored the range request for {filename} and answered {status}, restarting the download from scratch"
+                );
+                self.pb_manager.log_above_progress_bars(&log);
+                pb_dl.set_position(0);
+                false
+            }
+            _ => false,
+        };
+
+        // create/open file.part
+        // no need for a BufWriter because the HTTP chunks are rather large
+        let mut file = if append_to_part {
+            tfs::OpenOptions::new()
+                .append(true)
+                .create(false)
+                .open(&tmp_name)
+                .await?
+        } else {
+            // truncates any stale .part (AlreadyComplete is handled above)
+            tfs::File::create(&tmp_name).await?
+        };
 
         // Two distinct timeouts guard the body stream:
         // - `first_byte_timeout` bounds the wait for the server to *start*
@@ -356,7 +375,9 @@ enum ResumeAction {
     /// Download the whole body fresh, truncating any existing `.part`.
     Fresh,
     /// Resume an existing `.part` by requesting an open-ended range from the
-    /// given offset (e.g. `bytes=1024-`).
+    /// given offset (e.g. `bytes=1024-`). The server has the last word: one
+    /// that ignores the range and answers `200` with the whole body makes the
+    /// download restart from scratch.
     Resume(String),
     /// The `.part` already holds the complete body — finalize without a GET.
     AlreadyComplete,

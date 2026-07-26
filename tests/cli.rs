@@ -598,6 +598,41 @@ async fn range_416_during_resume_does_not_loop() {
 }
 
 #[tokio::test]
+async fn server_ignoring_range_restarts_instead_of_appending() {
+    // The server advertises Accept-Ranges on HEAD but answers the ranged GET
+    // with 200 and the whole body. Appending that to the half-finished .part
+    // would overshoot Content-Length, so dlm would raise IncompleteDownload,
+    // retry, and re-download the file a second time to recover. Detecting the
+    // non-206 reply up front gets the right file from a single transfer.
+    let server = TestServer::start().await;
+    let url = server.url("/ignore-range/data.bin");
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("data.bin.part"),
+        &FILE_BODY[..FILE_BODY.len() / 2],
+    )
+    .unwrap();
+
+    let r = no_hang(run_dlm_in(&[&url], tmp.path())).await;
+
+    assert_eq!(r.code, 0, "{r}");
+    assert_eq!(
+        read(&tmp.path().join("data.bin")),
+        FILE_BODY,
+        "the stale .part must be replaced, not appended to"
+    );
+    assert!(
+        !tmp.path().join("data.bin.part").exists(),
+        ".part should be renamed away"
+    );
+    assert_eq!(
+        server.ignore_range_get_count(),
+        1,
+        "the body should have been transferred exactly once: {r}"
+    );
+}
+
+#[tokio::test]
 async fn part_file_already_at_expected_size() {
     // The .part already holds the full body — e.g. dlm was killed between the
     // last chunk and the rename. dlm recognises it as complete, skips the GET
