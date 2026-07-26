@@ -6,6 +6,7 @@ mod file_link;
 mod headers;
 mod progress_bar_manager;
 mod retry;
+mod stats;
 mod user_agents;
 mod utils;
 
@@ -13,9 +14,10 @@ use crate::DlmError::EmptyInputFile;
 use crate::args::{Arguments, Input, get_args};
 use crate::client::ClientConfig;
 use crate::dlm_error::DlmError;
-use crate::downloader::DownloadContext;
+use crate::downloader::{DownloadContext, DownloadOutcome};
 use crate::progress_bar_manager::ProgressBarManager;
 use crate::retry::{retry_handler, retry_strategy, with_retries};
+use crate::stats::RunStats;
 use futures_util::stream::StreamExt;
 use std::pin::Pin;
 use tokio::io::AsyncBufReadExt;
@@ -55,6 +57,11 @@ async fn main_result() -> Result<(), DlmError> {
         basic_auth,
     } = get_args()?;
 
+    // start the clock before any I/O so the reported duration matches what
+    // wrapping the command in `time` would show
+    let stats = RunStats::new();
+    let stats = &stats;
+
     // setup interruption signal handler
     let token = CancellationToken::new();
     let signal_task_handler = spawn_signal_handler(token.clone());
@@ -83,19 +90,46 @@ async fn main_result() -> Result<(), DlmError> {
         basic_auth: basic_auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
         headers: &headers,
     };
-    let ctx = DownloadContext::new(&client_config, output_dir.as_path(), token, pbm)?;
+    let ctx = DownloadContext::new(&client_config, output_dir.as_path(), token, pbm, stats)?;
     let ctx = &ctx;
 
-    process_downloads(stream, ctx, token, pbm, retry, max_concurrent_downloads).await;
+    process_downloads(
+        stream,
+        ctx,
+        token,
+        pbm,
+        stats,
+        retry,
+        max_concurrent_downloads,
+    )
+    .await;
 
     // stop signal handling
     signal_task_handler.abort();
-    if token.is_cancelled() {
-        Err(DlmError::ProgramInterrupted)
-    } else {
-        pbm.finish_all().await?;
-        Ok(())
+    let interrupted = token.is_cancelled();
+
+    // An interrupted run gets its report too: the downloads that did finish
+    // are worth accounting for, and so are the bytes already on disk for the
+    // ones that will be resumed. Every in-flight download has released its
+    // progress bar by now - `for_each_concurrent` only resolves once they all
+    // returned - so collecting the bars cannot block here.
+    pbm.finish_all().await?;
+    pbm.print_report(&stats.summary_lines(interrupted));
+
+    if interrupted {
+        return Err(DlmError::ProgramInterrupted);
     }
+
+    // A run where some links could not be downloaded is a failed run - callers
+    // scripting around dlm should not have to parse the output to notice.
+    let failed = stats.failed_count();
+    if failed > 0 {
+        return Err(DlmError::DownloadsFailed {
+            failed,
+            processed: stats.processed_count(),
+        });
+    }
+    Ok(())
 }
 
 fn spawn_signal_handler(token: CancellationToken) -> tokio::task::JoinHandle<()> {
@@ -144,6 +178,7 @@ async fn process_downloads(
     ctx: &DownloadContext<'_>,
     token: &CancellationToken,
     pbm: &ProgressBarManager,
+    stats: &RunStats,
     retry: u32,
     max_concurrent_downloads: u32,
 ) {
@@ -154,7 +189,11 @@ async fn process_downloads(
                 return;
             }
             let message = match link_res {
-                Err(e) => Some(format!("Error with links iterator {e}")),
+                Err(e) => {
+                    // a link that could not even be read cannot be downloaded
+                    stats.record_failed();
+                    Some(format!("Error with links iterator {e}"))
+                }
                 Ok(link) => {
                     if is_empty_line(&link) {
                         None
@@ -174,9 +213,20 @@ async fn process_downloads(
                         pbm.release_progress_bar(dl_pb).await;
 
                         match processed {
-                            Ok(info) => Some(info),
+                            Ok(outcome) => {
+                                match &outcome {
+                                    DownloadOutcome::Completed(_) => stats.record_completed(),
+                                    DownloadOutcome::Skipped(_) => stats.record_skipped(),
+                                }
+                                Some(outcome.into_message())
+                            }
+                            // an interrupted download is not a failure, the run
+                            // is being torn down and already exits non-zero
                             Err(DlmError::ProgramInterrupted) => None,
-                            Err(e) => Some(format!("Error for {link}: {e}")),
+                            Err(e) => {
+                                stats.record_failed();
+                                Some(format!("Error for {link}: {e}"))
+                            }
                         }
                     }
                 }

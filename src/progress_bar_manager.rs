@@ -108,6 +108,24 @@ impl ProgressBarManager {
         Self::log_above_progress_bar(&self.main_pb, msg);
     }
 
+    /// Print the end-of-run report, once the progress bars are finished.
+    ///
+    /// On a terminal it goes through the progress bars so that each line lands
+    /// on its own line instead of being appended to the finished main bar.
+    /// When the bars draw nowhere - stdout redirected to a file or piped into
+    /// another command - indicatif would swallow the report, so it is written
+    /// to stdout directly. Unlike the running logs it carries no timestamp:
+    /// it describes the whole run, not a moment in it.
+    pub fn print_report(&self, lines: &[String]) {
+        for line in lines {
+            if self.main_pb.is_hidden() {
+                println!("{line}");
+            } else {
+                self.main_pb.println(line);
+            }
+        }
+    }
+
     fn log_above_progress_bar(pb: &ProgressBar, msg: &str) {
         let now = Zoned::now().strftime("%Y-%m-%d %H:%M:%S");
         pb.println(format!("[{now}] {msg}"));

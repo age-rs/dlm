@@ -168,15 +168,15 @@ async fn basic_auth_succeeds() {
 
 #[tokio::test]
 async fn basic_auth_missing_no_file_left() {
-    // Server returns 401 when Authorization is absent. dlm logs the per-link
-    // error but doesn't propagate it to the exit code (pre-existing behavior).
-    // The asserted invariant is: no file ends up on disk.
+    // Server returns 401 when Authorization is absent. Nothing ends up on
+    // disk and the failed link makes the run exit non-zero.
     let server = TestServer::start().await;
     let url = server.url("/auth/secret.bin");
 
-    let (_r, dir) = run_dlm(&[&url]).await;
+    let (r, dir) = run_dlm(&[&url]).await;
 
     assert!(!dir.path().join("secret.bin").exists());
+    assert_ne!(r.code, 0, "a failed download should exit non-zero: {r}");
 }
 
 #[tokio::test]
@@ -336,9 +336,9 @@ async fn not_found_leaves_no_file_on_disk() {
 
     let (_r, dir) = run_dlm(&[&url]).await;
 
-    // 404 is not retryable; dlm logs the error and exits.
-    // Per current behavior the exit code isn't checked, but the important
-    // invariant is that no `.part` file or final file is left behind.
+    // 404 is not retryable; dlm logs the error and exits. The invariant here
+    // is that no `.part` file or final file is left behind - the exit code of
+    // a failed download is covered by `failed_download_exits_non_zero`.
     let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
     assert!(
         entries.is_empty(),
@@ -444,10 +444,183 @@ async fn input_file_mixed_success_and_failure() {
     )
     .unwrap();
 
-    let _r = run_dlm_in(&["-i", input.to_str().unwrap()], tmp.path()).await;
+    let r = run_dlm_in(&["-i", input.to_str().unwrap()], tmp.path()).await;
 
     assert_eq!(read(&tmp.path().join("good.bin")), FILE_BODY);
     assert!(!tmp.path().join("never-found").exists());
+    // A partially successful run is still a failed run.
+    assert_ne!(r.code, 0, "one failed link should exit non-zero: {r}");
+    // The report must not let the failure hide behind the successful link.
+    // Asserted without the elapsed time, which is not what this is about and
+    // would tie the test to how loaded the machine is.
+    assert!(
+        r.stdout.contains("Finished in ") && r.stdout.contains("1 completed, 0 skipped, 1 failed"),
+        "summary should break the run down by outcome: {r}"
+    );
+    assert!(
+        r.stderr.contains("1 of 2 downloads failed"),
+        "stderr should state why the exit code is non-zero: {r}"
+    );
+}
+
+/// `ctrl-c` mid-run still produces a report, so an interrupted run says what
+/// it managed to do instead of leaving nothing behind. Unix only: it needs a
+/// real SIGINT, which is what dlm's signal handler listens for.
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_run_still_reports_what_was_done() {
+    let server = TestServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let input = tmp.path().join("links.txt");
+    // The first link is a local file that lands instantly; the second stalls
+    // for 30s, so the run is guaranteed to still be in flight when interrupted.
+    std::fs::write(
+        &input,
+        format!(
+            "{}\n{}\n",
+            server.url("/file/quick.bin"),
+            server.url("/stall/slow.bin"),
+        ),
+    )
+    .unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_dlm"))
+        .args(["-i", input.to_str().unwrap(), "--max-concurrent", "1"])
+        .arg("-o")
+        .arg(tmp.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn dlm");
+
+    // Wait for the first download to actually land rather than guessing a
+    // delay: the assertion below is about it being counted, and a fixed sleep
+    // would race with it on a loaded machine. The 30s stall on the second link
+    // leaves ample room.
+    let quick = tmp.path().join("quick.bin");
+    for _ in 0..100 {
+        if quick.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(quick.exists(), "the first download should have completed");
+
+    let pid = child.id().expect("dlm should still be running");
+    let killed = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .await
+        .expect("failed to signal dlm");
+    assert!(killed.success(), "kill -INT should succeed");
+
+    let output = no_hang(child.wait_with_output())
+        .await
+        .expect("failed to wait for dlm");
+    let r = DlmRun {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+
+    assert_ne!(r.code, 0, "an interrupted run should exit non-zero: {r}");
+    assert!(
+        r.stdout.contains("Interrupted after"),
+        "the report should not read like a clean ending: {r}"
+    );
+    // The finished download is accounted for; the stalled one is neither
+    // completed nor failed, it was simply cut short.
+    assert!(
+        r.stdout.contains("1 completed, 0 skipped, 0 failed"),
+        "the report should account for the finished download: {r}"
+    );
+    assert_eq!(read(&tmp.path().join("quick.bin")), FILE_BODY);
+}
+
+#[tokio::test]
+async fn failed_download_exits_non_zero() {
+    // A run whose only link 404s must exit non-zero so callers scripting
+    // around dlm notice without parsing the output.
+    let server = TestServer::start().await;
+    let url = server.url("/never-found");
+
+    let (r, _dir) = run_dlm(&[&url]).await;
+
+    assert_ne!(r.code, 0, "a failed download should exit non-zero: {r}");
+    assert!(
+        r.stderr.contains("1 of 1 downloads failed"),
+        "stderr should state why the exit code is non-zero: {r}"
+    );
+}
+
+#[tokio::test]
+async fn successful_run_reports_volume_and_speed() {
+    // The end-of-run report is printed on stdout even though the progress bars
+    // draw nothing here (stdout is a pipe, not a terminal), so a redirected
+    // run still gets its stats.
+    let server = TestServer::start().await;
+    let url = server.url("/file/stats.bin");
+
+    let (r, dir) = run_dlm(&[&url]).await;
+
+    assert_eq!(r.code, 0, "{r}");
+    assert_eq!(read(&dir.path().join("stats.bin")), FILE_BODY);
+    assert!(
+        r.stdout.contains("1 completed, 0 skipped, 0 failed"),
+        "summary should count the download: {r}"
+    );
+    // 64 KiB body, and the average speed is whatever the local server managed.
+    assert!(
+        r.stdout
+            .contains("Downloaded 64.00KiB at an average speed of"),
+        "summary should report the transferred volume: {r}"
+    );
+}
+
+#[tokio::test]
+async fn skipped_file_is_reported_as_skipped_not_completed() {
+    // The destination file is already there, so nothing is transferred: the
+    // run counts it as skipped and drops the volume line entirely.
+    let server = TestServer::start().await;
+    let url = server.url("/file/present.bin");
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("present.bin"), b"already here").unwrap();
+
+    let r = run_dlm_in(&[&url], tmp.path()).await;
+
+    assert_eq!(r.code, 0, "{r}");
+    assert!(
+        r.stdout.contains("0 completed, 1 skipped, 0 failed"),
+        "an existing file should count as skipped: {r}"
+    );
+    assert!(
+        !r.stdout.contains("Downloaded"),
+        "nothing was transferred, so no volume line should be printed: {r}"
+    );
+}
+
+#[tokio::test]
+async fn resumed_download_counts_only_transferred_bytes() {
+    // Half the body is already in the .part file, so only the remaining
+    // 32 KiB travels over the wire - the report is about traffic, not about
+    // the size of the resulting file.
+    let server = TestServer::start().await;
+    let url = server.url("/file/half.bin");
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(
+        tmp.path().join("half.bin.part"),
+        &FILE_BODY[..FILE_BODY.len() / 2],
+    )
+    .unwrap();
+
+    let r = run_dlm_in(&[&url], tmp.path()).await;
+
+    assert_eq!(r.code, 0, "{r}");
+    assert_eq!(read(&tmp.path().join("half.bin")), FILE_BODY);
+    assert!(
+        r.stdout.contains("Downloaded 32.00KiB"),
+        "only the resumed half should be counted as downloaded: {r}"
+    );
 }
 
 #[tokio::test]
@@ -629,6 +802,11 @@ async fn server_ignoring_range_restarts_instead_of_appending() {
         server.ignore_range_get_count(),
         1,
         "the body should have been transferred exactly once: {r}"
+    );
+    // Only the single transfer is billed to the run, not two.
+    assert!(
+        r.stdout.contains("Downloaded 64.00KiB"),
+        "the report should account for one transfer of the body: {r}"
     );
 }
 

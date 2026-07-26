@@ -16,7 +16,24 @@ use crate::headers::{
     content_disposition_value, content_length_value, location_value, parse_filename_header,
     parse_metadata_from, supports_range_bytes,
 };
+use crate::stats::RunStats;
 use crate::utils::pretty_bytes_size;
+
+/// What became of one link, along with the message to log for it.
+pub enum DownloadOutcome {
+    /// The file was fetched (or a complete `.part` finalized) during this run.
+    Completed(String),
+    /// The destination file was already there, so nothing was fetched.
+    Skipped(String),
+}
+
+impl DownloadOutcome {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::Completed(message) | Self::Skipped(message) => message,
+        }
+    }
+}
 
 pub struct DownloadContext<'a> {
     client: Client,
@@ -26,6 +43,7 @@ pub struct DownloadContext<'a> {
     output_dir: &'a Path,
     token: &'a CancellationToken,
     pb_manager: &'a ProgressBarManager,
+    stats: &'a RunStats,
 }
 
 impl<'a> DownloadContext<'a> {
@@ -34,6 +52,7 @@ impl<'a> DownloadContext<'a> {
         output_dir: &'a Path,
         token: &'a CancellationToken,
         pb_manager: &'a ProgressBarManager,
+        stats: &'a RunStats,
     ) -> Result<Self, DlmError> {
         Ok(Self {
             client: make_client(client_config, true)?,
@@ -43,6 +62,7 @@ impl<'a> DownloadContext<'a> {
             output_dir,
             token,
             pb_manager,
+            stats,
         })
     }
 
@@ -135,7 +155,7 @@ impl<'a> DownloadContext<'a> {
         &self,
         raw_link: &str,
         pb_dl: &ProgressBar,
-    ) -> Result<String, DlmError> {
+    ) -> Result<DownloadOutcome, DlmError> {
         let file_link = FileLink::new(raw_link)?;
 
         // When the filename is fully known from the URL, skip the HEAD request if the file exists
@@ -158,7 +178,7 @@ impl<'a> DownloadContext<'a> {
         &self,
         mut file_link: FileLink,
         pb_dl: &ProgressBar,
-    ) -> Result<String, DlmError> {
+    ) -> Result<DownloadOutcome, DlmError> {
         // extract metadata with a HEAD request, falling back to GET if needed
         let (content_length, supports_range, disposition_filename) =
             self.extract_metadata(&file_link.url).await?;
@@ -283,7 +303,11 @@ impl<'a> DownloadContext<'a> {
                 first_chunk = false;
             }
             file.write_all(&chunk).await?;
-            pb_dl.inc(chunk.len() as u64);
+            let chunk_len = chunk.len() as u64;
+            pb_dl.inc(chunk_len);
+            // counted as it arrives rather than from the final file size, so a
+            // download that fails later still reports the traffic it caused
+            self.stats.add_downloaded_bytes(chunk_len);
         }
         file.flush().await?; // flush buffer → OS
         file.sync_all().await?; // sync OS → disk
@@ -461,12 +485,12 @@ async fn compute_resume_action(
 async fn already_completed_message(
     final_file_path: &Path,
     filename: &str,
-) -> Result<String, DlmError> {
+) -> Result<DownloadOutcome, DlmError> {
     let final_file_size = tfs::metadata(final_file_path).await?.len();
-    Ok(format!(
+    Ok(DownloadOutcome::Skipped(format!(
         "Skipping {filename} because the file is already completed [{}]",
         pretty_bytes_size(final_file_size)
-    ))
+    )))
 }
 
 /// Move a completed `.part` to its final path, guarding against a file that
@@ -476,7 +500,7 @@ async fn finalize_download(
     final_file_path: &Path,
     filename: &str,
     final_file_size: u64,
-) -> Result<String, DlmError> {
+) -> Result<DownloadOutcome, DlmError> {
     // check if the destination already has a finished file
     if tfs::metadata(final_file_path).await.is_ok() {
         let message = format!(
@@ -488,11 +512,11 @@ async fn finalize_download(
 
     // rename part file to final
     tfs::rename(tmp_name, final_file_path).await?;
-    Ok(format!(
+    Ok(DownloadOutcome::Completed(format!(
         "Completed {} [{}]",
         filename,
         pretty_bytes_size(final_file_size)
-    ))
+    )))
 }
 
 #[cfg(test)]

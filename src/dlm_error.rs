@@ -30,6 +30,8 @@ pub enum DlmError {
     ClapError { e: clap::Error },
     #[error("Program interrupted")]
     ProgramInterrupted,
+    #[error("{failed} of {processed} downloads failed")]
+    DownloadsFailed { failed: u64, processed: u64 },
     #[error("other error - {message}")]
     Other { message: String },
 }

@@ -13,6 +13,7 @@ A minimal HTTP download manager that works just fine.
 - automatically retry re-establishing download in case of timeout or hanging connection
 - multi progress bars (made with [indicatif](https://github.com/mitsuhiko/indicatif))
 - native support for proxies and redirects
+- end of run report with per outcome counts, transferred volume and average speed
 
 ### Input file format
 
@@ -83,6 +84,47 @@ Options:
 ```bash
 ./dlm --input-file ~/dlm/links.txt --output-dir ~/dlm/output --max-concurrent 2
 ```
+
+## End of run report
+
+Every run ends with a breakdown of what actually happened:
+
+```
+Finished in 1m 12s - 53 completed, 2 skipped, 1 failed
+Downloaded 4.20GiB at an average speed of 5.94MiB/s
+```
+
+- `completed`: files downloaded during this run
+- `skipped`: files already present in the output directory
+- `failed`: links that could not be downloaded, retries included
+
+The volume and the speed describe the network traffic of the run: bytes already
+present in a resumed `.part` file are not counted, and the average speed is wall
+clock based, so it also covers the time spent waiting on servers and on retries.
+
+The report is printed on `stdout` and is kept when the output is redirected to a
+file or piped into another command, unlike the progress bars.
+
+A run stopped with `ctrl-c` is reported too, so an interrupted run still says
+what it got through:
+
+```
+Interrupted after 6s - 12 completed, 1 skipped, 0 failed
+Downloaded 3.00MiB at an average speed of 512.00KiB/s
+```
+
+The downloads still in flight count as neither completed nor failed: their
+`.part` files are left in place for the next run to resume.
+
+## Exit code
+
+`dlm` exits with `0` only if no download failed, making it usable in scripts:
+
+```bash
+./dlm --input-file ~/dlm/links.txt || echo "some downloads failed"
+```
+
+A run interrupted with `ctrl-c` also exits with a non-zero code.
 
 ## Installation
 
