@@ -26,7 +26,11 @@ fn known_speed(per_sec: f64) -> Option<u64> {
 }
 
 pub struct ProgressBarManager {
-    main_pb: ProgressBar,
+    mp: MultiProgress,
+    /// Counts the links processed so far. Absent for a single download, where
+    /// it could only ever read `0/1` then `1/1` - the file's own bar already
+    /// says everything there is to say.
+    main_pb: Option<ProgressBar>,
     file_pb_count: u64,
     tx: Sender<ProgressBar>,
     rx: Receiver<ProgressBar>,
@@ -39,13 +43,16 @@ impl ProgressBarManager {
         let draw_target = ProgressDrawTarget::stdout_with_hz(5);
         mp.set_draw_target(draw_target);
 
-        // main progress bar
-        let main_style = ProgressStyle::default_bar()
-            .template("{bar:133} {pos}/{len}")
-            .expect("templating should not fail");
-        let main_pb = mp.add(ProgressBar::new(0));
-        main_pb.set_style(main_style);
-        main_pb.set_length(main_pb_len);
+        // main progress bar, only worth drawing for more than one link
+        let main_pb = (main_pb_len > 1).then(|| {
+            let main_style = ProgressStyle::default_bar()
+                .template("{bar:133} {pos}/{len}")
+                .expect("templating should not fail");
+            let main_pb = mp.add(ProgressBar::new(0));
+            main_pb.set_style(main_style);
+            main_pb.set_length(main_pb_len);
+            main_pb
+        });
 
         // `file_pb_count` progress bars are shared between the threads at anytime
         let file_pb_count = min(u64::from(max_concurrent_downloads), main_pb_len);
@@ -85,6 +92,7 @@ impl ProgressBarManager {
         }
 
         Self {
+            mp,
             main_pb,
             file_pb_count,
             tx,
@@ -97,12 +105,16 @@ impl ProgressBarManager {
             let pb = self.rx.recv().await?;
             pb.finish_and_clear();
         }
-        self.main_pb.finish();
+        if let Some(main_pb) = &self.main_pb {
+            main_pb.finish();
+        }
         Ok(())
     }
 
     pub fn increment_global_progress(&self) {
-        self.main_pb.inc(1);
+        if let Some(main_pb) = &self.main_pb {
+            main_pb.inc(1);
+        }
     }
 
     const PROGRESS_BAR_MSG_WIDTH: usize = 35;
@@ -118,31 +130,30 @@ impl ProgressBarManager {
         }
     }
 
+    /// Logging goes through the `MultiProgress` rather than any single bar, so
+    /// it lands above whichever bars are on screen - there is not always a
+    /// main one to hang it off.
     pub fn log_above_progress_bars(&self, msg: &str) {
-        Self::log_above_progress_bar(&self.main_pb, msg);
+        let now = Zoned::now().strftime("%Y-%m-%d %H:%M:%S");
+        let _ = self.mp.println(format!("[{now}] {msg}"));
     }
 
     /// Print the end-of-run report, once the progress bars are finished.
     ///
     /// On a terminal it goes through the progress bars so that each line lands
-    /// on its own line instead of being appended to the finished main bar.
-    /// When the bars draw nowhere - stdout redirected to a file or piped into
-    /// another command - indicatif would swallow the report, so it is written
-    /// to stdout directly. Unlike the running logs it carries no timestamp:
-    /// it describes the whole run, not a moment in it.
+    /// on its own line instead of being appended to a finished bar. When the
+    /// bars draw nowhere - stdout redirected to a file or piped into another
+    /// command - indicatif would swallow the report, so it is written to
+    /// stdout directly. Unlike the running logs it carries no timestamp: it
+    /// describes the whole run, not a moment in it.
     pub fn print_report(&self, lines: &[String]) {
         for line in lines {
-            if self.main_pb.is_hidden() {
+            if self.mp.is_hidden() {
                 println!("{line}");
             } else {
-                self.main_pb.println(line);
+                let _ = self.mp.println(line);
             }
         }
-    }
-
-    fn log_above_progress_bar(pb: &ProgressBar, msg: &str) {
-        let now = Zoned::now().strftime("%Y-%m-%d %H:%M:%S");
-        pb.println(format!("[{now}] {msg}"));
     }
 
     pub async fn claim_progress_bar(&self) -> ProgressBar {
@@ -166,10 +177,10 @@ impl ProgressBarManager {
     #[cfg(test)]
     pub(crate) fn hidden() -> Self {
         let mp = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
-        let main_pb = mp.add(ProgressBar::hidden());
         let (tx, rx) = async_channel::bounded(1);
         Self {
-            main_pb,
+            mp,
+            main_pb: None,
             file_pb_count: 0,
             tx,
             rx,
@@ -220,7 +231,8 @@ mod recycling_tests {
             tx.send(pb).await.unwrap();
         }
         ProgressBarManager {
-            main_pb,
+            mp,
+            main_pb: Some(main_pb),
             file_pb_count: count as u64,
             tx,
             rx,
