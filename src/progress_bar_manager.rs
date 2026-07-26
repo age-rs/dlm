@@ -260,6 +260,29 @@ impl ProgressBarManager {
 }
 
 #[cfg(test)]
+mod global_bar_tests {
+    use super::ProgressBarManager;
+
+    /// A single link gets no global bar - it could only ever read `0/1` and
+    /// then `1/1`, which the file's own bar already says (#467). Anything
+    /// more than one link keeps it.
+    #[tokio::test]
+    async fn the_global_bar_is_only_built_for_more_than_one_link() {
+        let single = ProgressBarManager::init(2, 1).await;
+        assert!(
+            single.main_pb.is_none(),
+            "a single download should not get a global bar"
+        );
+
+        let several = ProgressBarManager::init(2, 5).await;
+        assert!(
+            several.main_pb.is_some(),
+            "several downloads should be tracked by a global bar"
+        );
+    }
+}
+
+#[cfg(test)]
 mod message_width_tests {
     use super::{MAX_MSG_WIDTH, MIN_MSG_WIDTH, pad_message};
 
