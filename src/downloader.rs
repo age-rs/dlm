@@ -248,7 +248,7 @@ impl<'a> DownloadContext<'a> {
                     "Server ignored the range request for {filename} and answered {status}, restarting the download from scratch"
                 );
                 self.pb_manager.log_above_progress_bars(&log);
-                pb_dl.set_position(0);
+                prime_position(pb_dl, 0);
                 false
             }
             _ => false,
@@ -407,6 +407,23 @@ enum ResumeAction {
     AlreadyComplete,
 }
 
+/// Move the bar to `pos` without letting the jump look like a transfer.
+///
+/// `set_position` feeds the rate estimator, so priming a resumed download with
+/// its offset reads as that many bytes arriving instantly - an enormous speed
+/// and an ETA of zero, displayed for as long as the GET takes to start
+/// answering. Dropping the sample right away leaves the bar with no estimate,
+/// which renders as `--` until the first real byte.
+fn prime_position(pb_dl: &ProgressBar, pos: u64) {
+    pb_dl.set_position(pos);
+    pb_dl.reset_eta();
+    // `set_position` has already drawn a frame carrying the bogus estimate,
+    // and without a steady tick the next draw only comes with the first byte -
+    // which is precisely the long wait this is about. Redraw now so the
+    // corrected `--` is what stays on screen.
+    pb_dl.tick();
+}
+
 /// Decide how to (re)start a download given the state of any `.part` file on
 /// disk and what the server advertises. Also primes the progress bar position.
 async fn compute_resume_action(
@@ -433,7 +450,7 @@ async fn compute_resume_action(
         (true, Some(cl)) => match tmp_size.cmp(&cl) {
             // already fully downloaded — finalize without re-fetching
             Ordering::Equal => {
-                pb_dl.set_position(tmp_size);
+                prime_position(pb_dl, tmp_size);
                 Ok(ResumeAction::AlreadyComplete)
             }
             // stale/corrupt .part bigger than the resource — start over
@@ -443,7 +460,7 @@ async fn compute_resume_action(
                     tmp_name.display()
                 );
                 pb_manager.log_above_progress_bars(&log);
-                pb_dl.set_position(0);
+                prime_position(pb_dl, 0);
                 Ok(ResumeAction::Fresh)
             }
             // genuine partial — resume from the current offset. An open-ended
@@ -452,7 +469,7 @@ async fn compute_resume_action(
             Ordering::Less => {
                 // set the progress bar to the current size; the elapsed/ETA
                 // clock is (re)started from the first byte in `download`.
-                pb_dl.set_position(tmp_size);
+                prime_position(pb_dl, tmp_size);
                 Ok(ResumeAction::Resume(format!("bytes={tmp_size}-")))
             }
         },
@@ -464,7 +481,7 @@ async fn compute_resume_action(
                 tmp_name.display()
             );
             pb_manager.log_above_progress_bars(&log);
-            pb_dl.set_position(0);
+            prime_position(pb_dl, 0);
             Ok(ResumeAction::Fresh)
         }
         // server can't serve a partial body — restart from scratch
@@ -474,7 +491,7 @@ async fn compute_resume_action(
                 tmp_name.display()
             );
             pb_manager.log_above_progress_bars(&log);
-            pb_dl.set_position(0);
+            prime_position(pb_dl, 0);
             Ok(ResumeAction::Fresh)
         }
     }
@@ -575,6 +592,31 @@ mod compute_resume_action_tests {
 
         assert_eq!(action, ResumeAction::AlreadyComplete);
         assert_eq!(pb.position(), 100);
+    }
+
+    /// Priming the bar with the resumed offset must not look like a transfer.
+    /// The jump from 0 to the offset happens instantly, and feeding it to the
+    /// rate estimator makes the bar advertise an enormous speed and an ETA of
+    /// zero for the whole time the GET is still connecting (issue #444).
+    #[tokio::test]
+    async fn resumed_bar_advertises_no_speed_before_the_first_byte() {
+        let dir = tempdir().unwrap();
+        let tmp_name = make_part(dir.path(), 40 * 1024 * 1024);
+        let pb = ProgressBar::hidden();
+        pb.set_length(100 * 1024 * 1024);
+        let pbm = ProgressBarManager::hidden();
+
+        let action = compute_resume_action(&pb, &pbm, Some(100 * 1024 * 1024), true, &tmp_name)
+            .await
+            .unwrap();
+
+        assert!(matches!(action, ResumeAction::Resume(_)));
+        assert_eq!(pb.position(), 40 * 1024 * 1024);
+        assert_eq!(
+            pb.per_sec(),
+            0.0,
+            "the resumed offset must not be counted as bytes transferred now"
+        );
     }
 
     #[tokio::test]

@@ -9,6 +9,22 @@ use std::cmp::{Ordering, min};
 
 const PENDING: &str = "pending";
 
+/// The transfer rate to display, or `None` when there is no credible estimate.
+///
+/// The rate estimator restarts from zero every time it is reset - once when
+/// the resumed offset is primed, once when the first byte arrives - and ramps
+/// up over the following samples. The values it reports on the way up are
+/// below one byte per second, which renders as `0 B/s` and, worse, turns into
+/// an ETA of thousands of years. A rate that rounds down to zero bytes is not
+/// a measurement, so it is reported as "not known yet" instead.
+fn known_speed(per_sec: f64) -> Option<u64> {
+    if per_sec.is_finite() && per_sec >= 1.0 {
+        Some(per_sec as u64)
+    } else {
+        None
+    }
+}
+
 pub struct ProgressBarManager {
     main_pb: ProgressBar,
     file_pb_count: u64,
@@ -46,19 +62,17 @@ impl ProgressBarManager {
             // still connecting. Render `--` whenever no real speed is known
             // (before the first byte, and during long stalls).
             .with_key("bytes_per_sec", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-                let per_sec = state.per_sec();
-                if per_sec > 0.0 && per_sec.is_finite() {
-                    write!(w, "{}/s", HumanBytes(per_sec as u64)).unwrap();
-                } else {
-                    write!(w, "--").unwrap();
+                match known_speed(state.per_sec()) {
+                    Some(per_sec) => write!(w, "{}/s", HumanBytes(per_sec)).unwrap(),
+                    None => write!(w, "--").unwrap(),
                 }
             })
             .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-                let per_sec = state.per_sec();
-                if per_sec > 0.0 && per_sec.is_finite() {
-                    write!(w, "{:#}", HumanDuration(state.eta())).unwrap();
-                } else {
-                    write!(w, "--").unwrap();
+                // The ETA is derived from the same estimate, so it is only
+                // worth showing when that estimate is.
+                match known_speed(state.per_sec()) {
+                    Some(_) => write!(w, "{:#}", HumanDuration(state.eta())).unwrap(),
+                    None => write!(w, "--").unwrap(),
                 }
             })
             .progress_chars("#>-");
@@ -160,6 +174,33 @@ impl ProgressBarManager {
             tx,
             rx,
         }
+    }
+}
+
+#[cfg(test)]
+mod speed_display_tests {
+    use super::known_speed;
+
+    #[test]
+    fn a_real_rate_is_displayed() {
+        assert_eq!(known_speed(1.0), Some(1));
+        assert_eq!(known_speed(1_048_576.0), Some(1_048_576));
+    }
+
+    /// The estimator ramping up after a reset reports rates that round down to
+    /// zero bytes; showing them yields `0 B/s` and an ETA of millennia (#444).
+    #[test]
+    fn a_rate_that_rounds_to_zero_is_not_a_measurement() {
+        assert_eq!(known_speed(0.0), None);
+        assert_eq!(known_speed(0.9), None);
+        assert_eq!(known_speed(1e-9), None);
+    }
+
+    #[test]
+    fn non_finite_rates_are_rejected() {
+        assert_eq!(known_speed(f64::NAN), None);
+        assert_eq!(known_speed(f64::INFINITY), None);
+        assert_eq!(known_speed(f64::NEG_INFINITY), None);
     }
 }
 
