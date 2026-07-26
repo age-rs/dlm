@@ -101,24 +101,26 @@ output directory - that is the whole test. There is no size comparison, no
 checksum and no timestamp check, so a truncated or unrelated file left by
 another tool counts as done; delete it to force a fresh download.
 
-The name is taken from the link whenever its last path segment carries an
-extension, and in that case the file is skipped without contacting the server
-at all. Otherwise `dlm` sends a `HEAD` request first and takes the name from
-the `Content-Disposition` header, or from the target of a redirect.
+The name comes from the link itself whenever one carrying an extension can be
+derived from it - normally the last path segment - and in that case the file is
+skipped without contacting the server at all. Otherwise `dlm` sends a `HEAD`
+request first and takes the name from the `Content-Disposition` header, or from
+the target of a redirect.
 
-Links that end in the same file name therefore map to the same file on disk:
-the first one downloads and the rest are reported as already completed, even
-when they point at different content.
+Links ending in the same file name therefore map to the same file on disk, even
+when they point at different content. Reached one after another, the first
+downloads and the rest are reported as already completed. Reached at the same
+time, they collide on the same `.part` file and all but one of them fail.
 
 An unfinished download sits next to it as `<name>.part`, and what happens to it
 on the next run depends on what the server reports:
 
 | `.part` compared to the server's size | outcome |
 | --- | --- |
-| the same | finalized as is, nothing is fetched |
+| the same, and the server serves ranges | finalized as is, nothing is fetched |
 | smaller, and the server serves ranges | resumed from that offset |
 | larger | discarded, downloaded again from scratch |
-| any size, but no range support or no size reported | discarded, downloaded again from scratch |
+| any size, when the server serves no ranges or reports no size | discarded, downloaded again from scratch |
 
 A resume only stands if the server answers `206 Partial Content`. One that
 advertises `Accept-Ranges` but replies `200` with the whole file has the `.part`
@@ -129,7 +131,7 @@ replaced rather than appended to.
 Every run ends with a breakdown of what actually happened:
 
 ```
-Finished in 1m 12s - 53 completed, 2 skipped, 1 failed
+Finished in 12m 04s - 53 completed, 2 skipped, 1 failed
 Downloaded 4.20GiB at an average speed of 5.94MiB/s
 ```
 
