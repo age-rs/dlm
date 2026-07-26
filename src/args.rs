@@ -131,6 +131,12 @@ fn command() -> Command {
                 .num_args(1)
                 .required(false),
         )
+        .arg(
+            Arg::new("no-color")
+                .help("Disable coloured output (also honours the NO_COLOR env var)")
+                .long("no-color")
+                .action(clap::ArgAction::SetTrue),
+        )
 }
 
 pub enum Input {
@@ -148,6 +154,7 @@ pub struct Arguments {
     pub connection_timeout_secs: u32,
     pub read_timeout_secs: u32,
     pub insecure: bool,
+    pub no_color: bool,
     pub headers: Vec<(String, String)>,
     pub basic_auth: Option<(String, String)>,
 }
@@ -256,6 +263,7 @@ pub fn get_args() -> Result<Arguments, DlmError> {
         .expect("impossible");
 
     let insecure = matches.get_flag("insecure");
+    let no_color = matches.get_flag("no-color");
 
     let headers = matches
         .get_many::<String>("header")
@@ -279,6 +287,7 @@ pub fn get_args() -> Result<Arguments, DlmError> {
         connection_timeout_secs,
         read_timeout_secs,
         insecure,
+        no_color,
         headers,
         basic_auth,
     })
@@ -346,6 +355,8 @@ mod args_tests {
     Custom request header (repeatable, format 'Name: Value')
     --user <user>
     Basic auth credentials in format 'user:password'
+    --no-color
+    Disable coloured output (also honours the NO_COLOR env var)
     -h, --help
     Print help
     -V, --version

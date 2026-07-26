@@ -53,9 +53,17 @@ async fn main_result() -> Result<(), DlmError> {
         connection_timeout_secs,
         read_timeout_secs,
         insecure,
+        no_color,
         headers,
         basic_auth,
     } = get_args()?;
+
+    // Settled before anything is printed. `console` already turns colours off
+    // for a non-terminal and honours NO_COLOR; this is the explicit override
+    // for terminals that claim more than they can render.
+    if no_color {
+        console::set_colors_enabled(false);
+    }
 
     // start the clock before any I/O so the reported duration matches what
     // wrapping the command in `time` would show

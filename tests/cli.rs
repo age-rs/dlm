@@ -537,6 +537,25 @@ async fn interrupted_run_still_reports_what_was_done() {
     assert_eq!(read(&tmp.path().join("quick.bin")), FILE_BODY);
 }
 
+/// `--no-color` must not change anything else about a run: the flag only
+/// suppresses styling, which is invisible here anyway because the tests
+/// capture stdout through a pipe. What this pins down is that the flag parses
+/// and the download still behaves.
+#[tokio::test]
+async fn no_color_flag_leaves_the_download_alone() {
+    let server = TestServer::start().await;
+    let url = server.url("/file/plain.bin");
+
+    let (r, dir) = run_dlm(&[&url, "--no-color"]).await;
+
+    assert_eq!(r.code, 0, "{r}");
+    assert_eq!(read(&dir.path().join("plain.bin")), FILE_BODY);
+    assert!(
+        !r.stdout.contains('\x1b'),
+        "no escape sequence should reach a redirected stdout: {r}"
+    );
+}
+
 #[tokio::test]
 async fn failed_download_exits_non_zero() {
     // A run whose only link 404s must exit non-zero so callers scripting

@@ -59,6 +59,8 @@ Options:
           Custom request header (repeatable, format 'Name: Value')
       --user <user>
           Basic auth credentials in format 'user:password'
+      --no-color
+          Disable coloured output (also honours the NO_COLOR env var)
   -h, --help
           Print help
   -V, --version
@@ -84,6 +86,13 @@ Options:
 ```bash
 ./dlm --input-file ~/dlm/links.txt --output-dir ~/dlm/output --max-concurrent 2
 ```
+
+## Colours
+
+Warnings and errors are coloured on a terminal. Colours are dropped
+automatically when the output is redirected or when `NO_COLOR` is set, and
+`--no-color` turns them off outright for terminals that report more support
+than they actually have.
 
 ## Skipping and resuming
 
