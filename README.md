@@ -85,6 +85,36 @@ Options:
 ./dlm --input-file ~/dlm/links.txt --output-dir ~/dlm/output --max-concurrent 2
 ```
 
+## Skipping and resuming
+
+`dlm` considers a link already downloaded when a file of that name sits in the
+output directory - that is the whole test. There is no size comparison, no
+checksum and no timestamp check, so a truncated or unrelated file left by
+another tool counts as done; delete it to force a fresh download.
+
+The name is taken from the link whenever its last path segment carries an
+extension, and in that case the file is skipped without contacting the server
+at all. Otherwise `dlm` sends a `HEAD` request first and takes the name from
+the `Content-Disposition` header, or from the target of a redirect.
+
+Links that end in the same file name therefore map to the same file on disk:
+the first one downloads and the rest are reported as already completed, even
+when they point at different content.
+
+An unfinished download sits next to it as `<name>.part`, and what happens to it
+on the next run depends on what the server reports:
+
+| `.part` compared to the server's size | outcome |
+| --- | --- |
+| the same | finalized as is, nothing is fetched |
+| smaller, and the server serves ranges | resumed from that offset |
+| larger | discarded, downloaded again from scratch |
+| any size, but no range support or no size reported | discarded, downloaded again from scratch |
+
+A resume only stands if the server answers `206 Partial Content`. One that
+advertises `Accept-Ranges` but replies `200` with the whole file has the `.part`
+replaced rather than appended to.
+
 ## End of run report
 
 Every run ends with a breakdown of what actually happened:
