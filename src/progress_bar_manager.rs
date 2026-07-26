@@ -9,6 +9,38 @@ use std::cmp::{Ordering, min};
 
 const PENDING: &str = "pending";
 
+/// Width assumed when stdout is not a terminal, matching what `console` falls
+/// back to. The bars draw nowhere in that case, so it only picks the layout.
+const FALLBACK_TERM_WIDTH: usize = 80;
+
+/// Terminals at least this wide can carry the full download line - elapsed
+/// time included - and still leave a usable bar.
+const ROOMY_TERM_WIDTH: usize = 120;
+
+/// Bounds on the filename column. Wide enough to recognise a file, never so
+/// wide that it crowds out the bar on a small terminal.
+const MIN_MSG_WIDTH: usize = 12;
+const MAX_MSG_WIDTH: usize = 35;
+
+/// Columns available on the terminal, or [`FALLBACK_TERM_WIDTH`] when stdout
+/// is not one.
+fn terminal_width() -> usize {
+    console::Term::stdout()
+        .size_checked()
+        .map_or(FALLBACK_TERM_WIDTH, |(_rows, cols)| cols as usize)
+}
+
+/// Truncate or pad `s` to exactly `width` characters, so the columns after it
+/// line up across bars.
+fn pad_message(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    match count.cmp(&width) {
+        Ordering::Greater => s.chars().take(width).collect(),
+        Ordering::Equal => s.to_string(),
+        Ordering::Less => format!("{}{}", s, " ".repeat(width - count)),
+    }
+}
+
 /// The transfer rate to display, or `None` when there is no credible estimate.
 ///
 /// The rate estimator restarts from zero every time it is reset - once when
@@ -27,6 +59,8 @@ fn known_speed(per_sec: f64) -> Option<u64> {
 
 pub struct ProgressBarManager {
     mp: MultiProgress,
+    /// Width of the filename column, sized once against the terminal.
+    msg_width: usize,
     /// Counts the links processed so far. Absent for a single download, where
     /// it could only ever read `0/1` then `1/1` - the file's own bar already
     /// says everything there is to say.
@@ -43,10 +77,17 @@ impl ProgressBarManager {
         let draw_target = ProgressDrawTarget::stdout_with_hz(5);
         mp.set_draw_target(draw_target);
 
+        // Every width below is derived from the terminal rather than fixed, so
+        // the lines stop wrapping on anything narrower than the old hardcoded
+        // 133-column bar. `{wide_bar}` is what makes the bar itself absorb
+        // whatever room the rest of the line leaves.
+        let term_width = terminal_width();
+        let msg_width = (term_width / 4).clamp(MIN_MSG_WIDTH, MAX_MSG_WIDTH);
+
         // main progress bar, only worth drawing for more than one link
         let main_pb = (main_pb_len > 1).then(|| {
             let main_style = ProgressStyle::default_bar()
-                .template("{bar:133} {pos}/{len}")
+                .template("{wide_bar} {pos}/{len}")
                 .expect("templating should not fail");
             let main_pb = mp.add(ProgressBar::new(0));
             main_pb.set_style(main_style);
@@ -60,39 +101,55 @@ impl ProgressBarManager {
         let (tx, rx): (Sender<ProgressBar>, Receiver<ProgressBar>) =
             async_channel::bounded(file_pb_count as usize);
 
+        // On a narrow terminal the elapsed time is the first column to go: it
+        // is the least useful of them, and dropping it buys the bar room
+        // instead of pushing the line into a second row.
+        let dl_template = if term_width >= ROOMY_TERM_WIDTH {
+            "{msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} (speed:{bytes_per_sec}) (eta:{eta})"
+        } else {
+            "{msg} [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) (eta:{eta})"
+        };
+
         let dl_style = ProgressStyle::default_bar()
-            .template("{msg} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} (speed:{bytes_per_sec}) (eta:{eta})")
+            .template(dl_template)
             .expect("templating should not fail")
             // Until the first byte is received the estimator has no data and the
             // default `{bytes_per_sec}`/`{eta}` would show `0/s` and `eta:0s`,
             // which misleadingly reads as "almost done" while the request is
             // still connecting. Render `--` whenever no real speed is known
             // (before the first byte, and during long stalls).
-            .with_key("bytes_per_sec", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-                match known_speed(state.per_sec()) {
+            .with_key(
+                "bytes_per_sec",
+                |state: &ProgressState, w: &mut dyn std::fmt::Write| match known_speed(
+                    state.per_sec(),
+                ) {
                     Some(per_sec) => write!(w, "{}/s", HumanBytes(per_sec)).unwrap(),
                     None => write!(w, "--").unwrap(),
-                }
-            })
-            .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| {
-                // The ETA is derived from the same estimate, so it is only
-                // worth showing when that estimate is.
-                match known_speed(state.per_sec()) {
-                    Some(_) => write!(w, "{:#}", HumanDuration(state.eta())).unwrap(),
-                    None => write!(w, "--").unwrap(),
-                }
-            })
+                },
+            )
+            .with_key(
+                "eta",
+                |state: &ProgressState, w: &mut dyn std::fmt::Write| {
+                    // The ETA is derived from the same estimate, so it is only
+                    // worth showing when that estimate is.
+                    match known_speed(state.per_sec()) {
+                        Some(_) => write!(w, "{:#}", HumanDuration(state.eta())).unwrap(),
+                        None => write!(w, "--").unwrap(),
+                    }
+                },
+            )
             .progress_chars("#>-");
 
         for _ in 0..file_pb_count {
             let file_pb = mp.add(ProgressBar::new(0));
             file_pb.set_style(dl_style.clone());
-            file_pb.set_message(Self::message_progress_bar(PENDING));
+            file_pb.set_message(pad_message(PENDING, msg_width));
             tx.send(file_pb).await.expect("channel should not fail");
         }
 
         Self {
             mp,
+            msg_width,
             main_pb,
             file_pb_count,
             tx,
@@ -117,17 +174,9 @@ impl ProgressBarManager {
         }
     }
 
-    const PROGRESS_BAR_MSG_WIDTH: usize = 35;
-
-    pub fn message_progress_bar(s: &str) -> String {
-        let max = Self::PROGRESS_BAR_MSG_WIDTH;
-        let count = s.chars().count();
-
-        match count.cmp(&max) {
-            Ordering::Greater => s.chars().take(max).collect(),
-            Ordering::Equal => s.to_string(),
-            Ordering::Less => format!("{}{}", s, " ".repeat(max - count)),
-        }
+    /// Fit `s` to the filename column of the download bars.
+    pub fn message_progress_bar(&self, s: &str) -> String {
+        pad_message(s, self.msg_width)
     }
 
     /// Logging goes through the `MultiProgress` rather than any single bar, so
@@ -165,7 +214,7 @@ impl ProgressBarManager {
 
     pub async fn release_progress_bar(&self, pb: ProgressBar) {
         pb.reset();
-        pb.set_message(Self::message_progress_bar(PENDING));
+        pb.set_message(self.message_progress_bar(PENDING));
         self.tx
             .send(pb)
             .await
@@ -180,10 +229,50 @@ impl ProgressBarManager {
         let (tx, rx) = async_channel::bounded(1);
         Self {
             mp,
+            msg_width: MAX_MSG_WIDTH,
             main_pb: None,
             file_pb_count: 0,
             tx,
             rx,
+        }
+    }
+}
+
+#[cfg(test)]
+mod message_width_tests {
+    use super::{MAX_MSG_WIDTH, MIN_MSG_WIDTH, pad_message};
+
+    #[test]
+    fn short_names_are_padded_to_the_column_width() {
+        assert_eq!(pad_message("a.bin", 10), "a.bin     ");
+        assert_eq!(pad_message("a.bin", 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn long_names_are_truncated_to_the_column_width() {
+        let long = "a-very-long-file-name-that-does-not-fit.bin";
+        assert_eq!(pad_message(long, 10).chars().count(), 10);
+        assert_eq!(pad_message(long, 10), "a-very-lon");
+    }
+
+    /// Truncation counts characters, not bytes, so a multi-byte name cannot
+    /// be cut mid-character and the column stays aligned.
+    #[test]
+    fn truncation_respects_character_boundaries() {
+        let name = "ünïcödé-fïlé-nämé.bin";
+        let cut = pad_message(name, 6);
+        assert_eq!(cut.chars().count(), 6);
+        assert_eq!(cut, "ünïcöd");
+    }
+
+    /// The width is derived from the terminal, so the bounds are what keep a
+    /// tiny terminal from losing the name and a huge one from wasting a third
+    /// of the line on it.
+    #[test]
+    fn width_bounds_are_sane() {
+        for term in [20_usize, 80, 120, 200, 1000] {
+            let w = (term / 4).clamp(MIN_MSG_WIDTH, MAX_MSG_WIDTH);
+            assert!((MIN_MSG_WIDTH..=MAX_MSG_WIDTH).contains(&w), "term {term}");
         }
     }
 }
@@ -227,11 +316,12 @@ mod recycling_tests {
         let (tx, rx) = async_channel::bounded(count.max(1));
         for _ in 0..count {
             let pb = mp.add(ProgressBar::hidden());
-            pb.set_message(ProgressBarManager::message_progress_bar(PENDING));
+            pb.set_message(pad_message(PENDING, MAX_MSG_WIDTH));
             tx.send(pb).await.unwrap();
         }
         ProgressBarManager {
             mp,
+            msg_width: MAX_MSG_WIDTH,
             main_pb: Some(main_pb),
             file_pb_count: count as u64,
             tx,

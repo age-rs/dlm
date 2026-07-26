@@ -199,7 +199,7 @@ impl<'a> DownloadContext<'a> {
         }
 
         // setup progress bar for the file
-        pb_dl.set_message(ProgressBarManager::message_progress_bar(&filename));
+        pb_dl.set_message(self.pb_manager.message_progress_bar(&filename));
         if let Some(total_size) = content_length {
             pb_dl.set_length(total_size);
         }
