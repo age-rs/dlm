@@ -204,7 +204,7 @@ async fn echo_headers(State(state): State<ServerState>, headers: HeaderMap) -> R
 async fn flaky(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     let consumed = state
         .flaky_remaining
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
             if n > 0 { Some(n - 1) } else { None }
         });
     if consumed.is_ok() {
