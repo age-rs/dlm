@@ -23,6 +23,21 @@ const ROOMY_TERM_WIDTH: usize = 120;
 const MIN_MSG_WIDTH: usize = 12;
 const MAX_MSG_WIDTH: usize = 35;
 
+/// Widest the bars are allowed to get. Past a certain point a bar conveys
+/// nothing more and simply sprawls across the screen, so the extra room on a
+/// wide terminal is left unused. These are the widths dlm has always drawn,
+/// which is what a roomy terminal keeps getting - the difference is that the
+/// bars now shrink below them instead of wrapping.
+const MAX_MAIN_BAR_WIDTH: usize = 133;
+const MAX_FILE_BAR_WIDTH: usize = 40;
+
+/// Room the columns beside the bars need at their widest: `{pos}/{len}` for
+/// the main bar, and for a download line the elapsed time, transferred/total,
+/// speed and ETA at their longest renderings - its file name column is
+/// counted separately, being sized from the terminal.
+const MAIN_LINE_OVERHEAD: usize = 16;
+const DL_LINE_OVERHEAD: usize = 70;
+
 /// Columns available on the terminal, or [`FALLBACK_TERM_WIDTH`] when stdout
 /// is not one.
 fn terminal_width() -> usize {
@@ -78,17 +93,27 @@ impl ProgressBarManager {
         let draw_target = ProgressDrawTarget::stdout_with_hz(5);
         mp.set_draw_target(draw_target);
 
-        // Every width below is derived from the terminal rather than fixed, so
-        // the lines stop wrapping on anything narrower than the old hardcoded
-        // 133-column bar. `{wide_bar}` is what makes the bar itself absorb
-        // whatever room the rest of the line leaves.
+        // The layout is chosen against the terminal instead of assuming one at
+        // least 140 columns wide. A bar keeps its familiar fixed width while
+        // the line has room to spare; once it does not, `{wide_bar}` takes
+        // over and shrinks into what is left rather than wrapping.
         let term_width = terminal_width();
         let msg_width = (term_width / 4).clamp(MIN_MSG_WIDTH, MAX_MSG_WIDTH);
+
+        // A fixed width is used whenever the terminal has room for it, so a
+        // wide screen keeps the familiar bar instead of one stretched across
+        // it; `{wide_bar}` takes over below that, shrinking to fit rather than
+        // wrapping.
+        let main_bar = if term_width >= MAX_MAIN_BAR_WIDTH + MAIN_LINE_OVERHEAD {
+            format!("{{bar:{MAX_MAIN_BAR_WIDTH}}}")
+        } else {
+            "{wide_bar}".to_string()
+        };
 
         // main progress bar, only worth drawing for more than one link
         let main_pb = (main_pb_len > 1).then(|| {
             let main_style = ProgressStyle::default_bar()
-                .template("{wide_bar} {pos}/{len}")
+                .template(&format!("{main_bar} {{pos}}/{{len}}"))
                 .expect("templating should not fail");
             let main_pb = mp.add(ProgressBar::new(0));
             main_pb.set_style(main_style);
@@ -102,17 +127,31 @@ impl ProgressBarManager {
         let (tx, rx): (Sender<ProgressBar>, Receiver<ProgressBar>) =
             async_channel::bounded(file_pb_count as usize);
 
+        // The bar only takes its fixed width once the line is sure to hold it
+        // even when every column renders at its longest - otherwise a file
+        // large enough to widen the byte counts would push the line into a
+        // second row. Below that `{wide_bar}` shrinks into whatever is left.
+        let dl_bar = if term_width >= msg_width + DL_LINE_OVERHEAD + MAX_FILE_BAR_WIDTH {
+            format!("{{bar:{MAX_FILE_BAR_WIDTH}.cyan/blue}}")
+        } else {
+            "{wide_bar:.cyan/blue}".to_string()
+        };
+
         // On a narrow terminal the elapsed time is the first column to go: it
         // is the least useful of them, and dropping it buys the bar room
         // instead of pushing the line into a second row.
         let dl_template = if term_width >= ROOMY_TERM_WIDTH {
-            "{msg} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} (speed:{bytes_per_sec}) (eta:{eta})"
+            format!(
+                "{{msg}} [{{elapsed_precise}}] [{dl_bar}] {{bytes}}/{{total_bytes}} (speed:{{bytes_per_sec}}) (eta:{{eta}})"
+            )
         } else {
-            "{msg} [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) (eta:{eta})"
+            format!(
+                "{{msg}} [{dl_bar}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) (eta:{{eta}})"
+            )
         };
 
         let dl_style = ProgressStyle::default_bar()
-            .template(dl_template)
+            .template(&dl_template)
             .expect("templating should not fail")
             // Until the first byte is received the estimator has no data and the
             // default `{bytes_per_sec}`/`{eta}` would show `0/s` and `eta:0s`,
