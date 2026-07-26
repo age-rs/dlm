@@ -31,6 +31,10 @@ jobs:
         with:
           target: ${{ matrix.target }}
           bin: dlm
+          # e.g. dlm-v0.7.3-x86_64-unknown-linux-gnu.tar.gz - the default
+          # `$bin-$target` gives every release the same file name, which is
+          # awkward once a few of them sit in the same directory.
+          archive: $bin-$tag-$target
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
